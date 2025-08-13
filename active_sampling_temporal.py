@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument(
         "--agent_config",
         type=str,
-        default="configs/echonet_3_frames.yaml",
+        default="configs/cardiac_112_3_frames.yaml",
         help="Path to agent config yaml.",
     )
     parser.add_argument(
@@ -116,7 +116,12 @@ from ulsa.io_utils import (
 )
 from ulsa.ops import lines_rx_apo
 from ulsa.pipeline import make_pipeline
-from ulsa.utils import select_transmits, update_scan_for_polar_grid
+from ulsa.utils import (
+    get_subsampled_parameters,
+    select_transmits,
+    selected_lines_to_transmits,
+    update_scan_for_polar_grid,
+)
 from zea import Config, File, Pipeline, Probe, Scan, log, set_data_paths
 from zea.agent.masks import k_hot_to_indices
 from zea.tensor_ops import batched_map, func_with_one_batch_dim
@@ -227,50 +232,41 @@ def run_active_sampling(
     hard_project=False,
     verbose=True,
     post_pipeline: Pipeline = None,
-    pfield: np.ndarray = None,
+    data_type: str = "data/image",
 ) -> AgentResults:
+    """Run active sampling on a target sequence."""
+
     if verbose:
         log.info(log.blue("Running active sampling"))
         agent.print_summary()
 
-    # Prepare acquisition function
-    if getattr(scan, "n_tx", None) is not None and scan.n_tx > 1:
-        disabled_pfield = ops.ones((scan.grid_size_z * scan.grid_size_x, scan.n_tx))
-        if pfield is not None:
-            flat_pfield = pfield.reshape(scan.n_tx, -1).swapaxes(0, 1)
-            flat_pfield = ops.convert_to_tensor(flat_pfield)
-        else:
-            flat_pfield = disabled_pfield
-        rx_apo = lines_rx_apo(scan.n_tx, scan.grid_size_z, scan.grid_size_x)
+    if data_type == "data/raw_data":
         bandpass_rf = scipy.signal.firwin(
             numtaps=128,
             cutoff=np.array([0.5, 1.5]) * scan.center_frequency,
             pass_zero="bandpass",
             fs=scan.sampling_frequency,
         )
-        base_params = pipeline.prepare_parameters(
-            scan=scan,
-            probe=probe,
-            flat_pfield=flat_pfield,
-            rx_apo=rx_apo,
-            bandwidth=2e6,
-            bandpass_rf=bandpass_rf,
-        )
+        rx_apo = lines_rx_apo(scan.n_tx, scan.grid_size_z, scan.grid_size_x)
+        bandwidth = 2e6
 
-        # No pfield for target
-        target_pipeline_params = base_params | dict(flat_pfield=disabled_pfield)
+        params = pipeline.prepare_parameters(
+            bandpass_rf=bandpass_rf, rx_apo=rx_apo, bandwidth=bandwidth
+        )
+    else:
+        params = {}
+
+    # Prepare acquisition function
+    if data_type == "data/raw_data":
 
         def acquire(
             full_data,
             mask,
             selected_lines,
             pipeline_state: dict,
-            target_pipeline_state: dict,
         ):
             # Run pipeline with full data
-            output = pipeline(
-                data=full_data, **(target_pipeline_params | target_pipeline_state)
-            )
+            output = pipeline(data=full_data, **pipeline_state)
             target = output["data"]
 
             # We use the same maxval & dynamic range for target and measurements.
@@ -280,29 +276,21 @@ def run_active_sampling(
             maxval = output["maxval"]
             dynamic_range = output["dynamic_range"]
             pipeline_state = {"maxval": maxval, "dynamic_range": dynamic_range}
-            target_pipeline_state = {"maxval": maxval, "dynamic_range": dynamic_range}
 
             # Select transmits
-            transmits = k_hot_to_indices(selected_lines, n_actions)
-            transmits = ops.squeeze(transmits, 0)
-            selected_data = full_data[transmits]
-            params = pipeline_state | dict(
-                t0_delays=base_params["t0_delays"][transmits],
-                tx_apodizations=base_params["tx_apodizations"][transmits],
-                polar_angles=base_params["polar_angles"][transmits],
-                focus_distances=base_params["focus_distances"][transmits],
-                initial_times=base_params["initial_times"][transmits],
-                flat_pfield=base_params["flat_pfield"][:, transmits],
-                n_tx=len(transmits),
-                rx_apo=base_params["rx_apo"][transmits],
+            transmits = selected_lines_to_transmits(selected_lines, n_actions)
+            selected_data = full_data[np.array(transmits)]
+            subsampled_parameters = get_subsampled_parameters(
+                data_type, scan, selected_lines, rx_apo, n_actions
             )
-            params = pipeline.prepare_parameters(**params)
+            params |= pipeline.prepare_parameters(**subsampled_parameters)
+            params |= pipeline_state
 
             # Run pipeline with selected lines
-            output = pipeline(data=selected_data, **(base_params | params))
+            output = pipeline(data=selected_data, **params)
             measurements = output["data"]
 
-            return measurements, target, pipeline_state, target_pipeline_state
+            return measurements, target, pipeline_state
 
     else:
         if scan is not None:
@@ -315,7 +303,6 @@ def run_active_sampling(
             mask,
             selected_lines,
             pipeline_state: dict,
-            target_pipeline_state: dict,
         ):
             target = pipeline(data=full_data, **params, **pipeline_state)["data"]
             return target * mask, target, {}, {}
@@ -324,12 +311,11 @@ def run_active_sampling(
         # 1. Acquire measurements
         current_mask = agent_state.mask[..., -1, None]
         selected_lines = agent_state.selected_lines[None]  # (1, n_tx)
-        measurements, target_img, pipeline_state, target_pipeline_state = acquire(
+        measurements, target_img, pipeline_state = acquire(
             target_data,
             current_mask,
             selected_lines,
             agent_state.pipeline_state,
-            agent_state.target_pipeline_state,
         )
 
         if agent.pfield is None:
@@ -349,7 +335,6 @@ def run_active_sampling(
             )
 
         new_agent_state.pipeline_state = pipeline_state
-        new_agent_state.target_pipeline_state = target_pipeline_state
         return (
             new_agent_state,
             (
@@ -556,7 +541,6 @@ def active_sampling_single_file(
         probe=probe,
         hard_project=agent_config.diffusion_inference.hard_project,
         post_pipeline=post_pipeline,
-        pfield=pfield,
     )
 
     if agent_config.downstream_task is not None:

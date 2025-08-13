@@ -80,7 +80,6 @@ class AgentState:
     posterior_samples: Any  # tensor of shape [n_particles, height, width, n_frames]: these are used as initial samples for SeqDiff
     belief_distribution: Any  # tensor of shape [n_particles, height, width, 1]: posterior samples at time t
     pipeline_state: Any
-    target_pipeline_state: Any
     saliency_map: Any  # heatmap used to make action selection decisions
 
     def tree_flatten(self):
@@ -93,7 +92,6 @@ class AgentState:
             self.posterior_samples,
             self.belief_distribution,
             self.pipeline_state,
-            self.target_pipeline_state,
             self.saliency_map,
         )
         aux = None
@@ -264,7 +262,6 @@ def reset_agent_state(agent: Agent, seed, batch_size=None):
         posterior_samples=None,
         belief_distribution=None,
         pipeline_state={},
-        target_pipeline_state={},
         saliency_map=saliency_map,
     )
 
