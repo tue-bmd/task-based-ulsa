@@ -1,4 +1,4 @@
-# Patient-Adaptive Focused Transmit Beamforming using Cognitive Ultrasound
+# Task-based Transmit Beamforming for Efficient Ultrasound Quantification
 
 The repo contains the code for the paper [Task-based Transmit Beamforming for Efficient Ultrasound Quantification](https://tue-bmd.github.io/task-based-ulsa/).
 
