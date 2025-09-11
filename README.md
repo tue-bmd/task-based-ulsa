@@ -1,8 +1,10 @@
 # Patient-Adaptive Focused Transmit Beamforming using Cognitive Ultrasound
 
-The repo contains the code for the paper [Patient-Adaptive Focused Transmit Beamforming using Cognitive Ultrasound](https://tue-bmd.github.io/ulsa/). For more information, please refer to the [project page](https://tue-bmd.github.io/ulsa/).
+The repo contains the code for the paper [Task-based Transmit Beamforming for Efficient Ultrasound Quantification](https://tue-bmd.github.io/task-based-ulsa/).
 
-Find the weights of our model on [Huggingface](https://huggingface.co/zeahub/ulsa).
+Find the weights of our models on Huggingface:
+- [EchoNetLVH Segmentation Model](https://huggingface.co/zeahub/echonetlvh).
+- [EchoNetLVH Diffusion Model](https://huggingface.co/zeahub/diffusion-echonetlvh)
 
 ## Setup code
 
@@ -31,12 +33,10 @@ touch users.yaml # edit!
 
 ## Dataset
 
-- Download the [EchoNet-Dynamic dataset](https://echonet.github.io/dynamic/index.html#dataset).
+- Download the [EchoNetLVH dataset](https://echonet.github.io/lvh/index.html#dataset).
 
-- [_Optionally_] Download the train / validation / test split we used for the [EchoNet-Dynamic dataset](https://huggingface.co/datasets/zeahub/echonet-dynamic).
+- Convert the dataset to the polar format using the `zea` conversion scripts described (here)[https://github.com/tue-bmd/zea/tree/main/zea/data/convert/echonetlvh].
 
-- Convert the dataset to the polar format:
 
-    ```bash
-    python -m zea.data.convert.echonet --source /path/to/echonet-dynamic --target /path/to/echonet-dynamic-polar --splits /path/to/splits
-    ```
+## Example Notebook
+Coming soon...
