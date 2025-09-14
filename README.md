@@ -1,6 +1,6 @@
-# Task-based Transmit Beamforming for Efficient Ultrasound Quantification
+# Task-based Adaptive Transmit Beamforming for Efficient Ultrasound Quantification
 
-The repo contains the code for the paper [Task-based Transmit Beamforming for Efficient Ultrasound Quantification](https://tue-bmd.github.io/task-based-ulsa/).
+The repo contains the code for the paper [Task-based Adaptive Transmit Beamforming for Efficient Ultrasound Quantification](https://tue-bmd.github.io/task-based-ulsa/).
 
 Find the weights of our models on Huggingface:
 - [EchoNetLVH Segmentation Model](https://huggingface.co/zeahub/echonetlvh).
