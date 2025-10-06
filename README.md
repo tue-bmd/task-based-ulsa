@@ -39,4 +39,4 @@ touch users.yaml # edit!
 
 
 ## Example Notebook
-Coming soon...
+See the `zea` example notebook implementing the task-based perception action loop: [https://zea.readthedocs.io/en/latest/notebooks/agent/task_based_perception_action_loop.html](https://zea.readthedocs.io/en/latest/notebooks/agent/task_based_perception_action_loop.html)
