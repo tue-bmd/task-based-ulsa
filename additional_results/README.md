@@ -56,3 +56,8 @@ Here we provide an extended set of results to supplement those presented in the 
 | 1/256 | 58.0 | 1.44e-10 | *** |
 | 3/256 | 44.0 | 2.63e-11 | *** |
 | 5/256 | 27.0 | 2.24e-12 | *** |
+
+## Additional Qualitative Results
+<img width="1421" height="2874" alt="combined_time_series_multisequence_x5_all" src="https://github.com/user-attachments/assets/a47e4b0c-cd39-425f-922a-2d63ebdb0ce9" />
+
+
