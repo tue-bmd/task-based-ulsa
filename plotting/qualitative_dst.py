@@ -1050,30 +1050,54 @@ def create_combined_time_series_plot_multiple_sequences(
         # Adjust figure size: 2/3 of IEEE page width, height based on total rows
         width = 4.77
         row_height = 0.9  # Height per measurement row
-        sequence_spacing = 0.3  # Extra space between sequences for titles
-        height = total_rows * row_height + (n_sequences - 1) * sequence_spacing + 1.0  # Extra for legend and titles
+        sequence_spacing = 0.5  # Extra space between sequences
+        height = total_rows * row_height + (n_sequences - 1) * sequence_spacing + 1.2  # Extra for legend and titles
         
-        fig, axes = plt.subplots(total_rows, 2, figsize=(width, height))
-
-        # Handle single row case
-        if total_rows == 1:
-            axes = axes.reshape(1, -1)
+        # Create figure with GridSpec for more control over spacing
+        fig = plt.figure(figsize=(width, height))
+        
+        # Calculate height ratios: equal for all rows, but we'll add space between sequence blocks
+        # We'll create extra "spacer" rows between sequences
+        n_spacers = n_sequences - 1
+        total_grid_rows = total_rows + n_spacers
+        
+        height_ratios = []
+        for seq_idx in range(n_sequences):
+            # Add measurement rows for this sequence
+            for _ in range(n_measurements):
+                height_ratios.append(1.0)
+            # Add spacer after each sequence except the last
+            if seq_idx < n_sequences - 1:
+                height_ratios.append(0.5)  # Spacer row (smaller height)
+        
+        gs = gridspec.GridSpec(total_grid_rows, 2, figure=fig, height_ratios=height_ratios,
+                               hspace=0.1, wspace=0.25)
+        
+        # Create axes, skipping spacer rows
+        axes = []
+        grid_row = 0
+        for seq_idx in range(n_sequences):
+            seq_axes = []
+            for meas_idx in range(n_measurements):
+                ax1 = fig.add_subplot(gs[grid_row, 0])
+                ax2 = fig.add_subplot(gs[grid_row, 1])
+                seq_axes.append((ax1, ax2))
+                grid_row += 1
+            axes.append(seq_axes)
+            # Skip spacer row
+            if seq_idx < n_sequences - 1:
+                grid_row += 1
 
         # Store legend information (only need one set)
         legend_handles = None
         legend_labels = None
 
-        # Track row indices for each sequence block (for adding sequence titles)
-        sequence_start_rows = []
-
         for seq_idx in range(n_sequences):
             data1 = data1_list[seq_idx]
             data2 = data2_list[seq_idx]
-            
-            sequence_start_rows.append(seq_idx * n_measurements)
 
             for meas_idx, measurement_type in enumerate(measurement_types_to_plot):
-                row_idx = seq_idx * n_measurements + meas_idx
+                ax1, ax2 = axes[seq_idx][meas_idx]
                 color = MEASUREMENT_COLORS[measurement_type]
 
                 # Get frame indices for both sequences (can be different lengths)
@@ -1139,8 +1163,6 @@ def create_combined_time_series_plot_multiple_sequences(
                     shared_ylim = (0, 1)
 
                 # Plot for strategy 1 (left column) - greedy_entropy
-                ax1 = axes[row_idx, 0]
-
                 # Target and reconstruction for strategy 1
                 valid_target1 = ~np.isnan(target_lengths1)
                 valid_recon1 = ~np.isnan(recon_lengths1)
@@ -1182,8 +1204,8 @@ def create_combined_time_series_plot_multiple_sequences(
                             alpha=0.2,
                         )
 
-                # Store legend handles and labels (only need to do this once per measurement type)
-                if seq_idx == 0 and legend_handles is None:
+                # Store legend handles and labels (only need to do this once)
+                if seq_idx == 0 and meas_idx == 0 and legend_handles is None:
                     legend_handles = [line1, line2]
                     legend_labels = ["Target", "Reconstruction"]
                     if fill_patch is not None:
@@ -1202,8 +1224,6 @@ def create_combined_time_series_plot_multiple_sequences(
                     )
 
                 # Plot for strategy 2 (right column) - downstream_task_selection
-                ax2 = axes[row_idx, 1]
-
                 # Target and reconstruction for strategy 2
                 valid_target2 = ~np.isnan(target_lengths2)
                 valid_recon2 = ~np.isnan(recon_lengths2)
@@ -1269,7 +1289,7 @@ def create_combined_time_series_plot_multiple_sequences(
                 # Y-axis label: Measurement type on left column
                 ax1.set_ylabel(f"{measurement_type} [cm]", fontsize=8)
 
-                # X-axis label only on the last row of each sequence block
+                # X-axis label on the last row of each sequence block
                 is_last_measurement_in_sequence = (meas_idx == n_measurements - 1)
                 if is_last_measurement_in_sequence:
                     ax1.set_xlabel("Frame", fontsize=8)
@@ -1285,23 +1305,19 @@ def create_combined_time_series_plot_multiple_sequences(
                 ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
                 ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
 
-        # Add column titles (strategy names)
-        axes[0, 0].set_title(strategy1_name, fontsize=9, pad=10)
-        axes[0, 1].set_title(strategy2_name, fontsize=9, pad=10)
+        # Add column titles (strategy names) to the first row
+        axes[0][0][0].set_title(strategy1_name, fontsize=9, pad=10)
+        axes[0][0][1].set_title(strategy2_name, fontsize=9, pad=10)
 
         # Adjust layout
         plt.tight_layout()
-        plt.subplots_adjust(top=0.92, wspace=0.25, hspace=0.15, left=0.15, right=0.95)
+        plt.subplots_adjust(top=0.92, left=0.15, right=0.95)
 
         # Add sequence labels as text annotations on the left side
         for seq_idx in range(n_sequences):
-            # Get the first row of this sequence block
-            first_row_idx = seq_idx * n_measurements
-            last_row_idx = first_row_idx + n_measurements - 1
-            
-            # Get positions of first and last axes in this sequence block
-            ax_first = axes[first_row_idx, 0]
-            ax_last = axes[last_row_idx, 0]
+            # Get the first and last axes in this sequence block
+            ax_first = axes[seq_idx][0][0]
+            ax_last = axes[seq_idx][-1][0]
             
             pos_first = ax_first.get_position()
             pos_last = ax_last.get_position()
@@ -1327,7 +1343,7 @@ def create_combined_time_series_plot_multiple_sequences(
                 legend_handles,
                 legend_labels,
                 loc="upper center",
-                bbox_to_anchor=(0.55, 0.98),
+                bbox_to_anchor=(0.55, 0.99),
                 ncol=len(legend_labels),  # Arrange horizontally
                 fontsize=8,
                 framealpha=0.9,
@@ -1339,7 +1355,6 @@ def create_combined_time_series_plot_multiple_sequences(
         print(
             f"Saved combined time series comparison (multiple sequences, all measurements) to {save_path}"
         )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
