@@ -1261,5 +1261,127 @@ if __name__ == "__main__":
                     file_ext=".png"
                 )
 
+        # Print markdown table of MAE statistics
+        print("\n## MAE Statistics (Mean ± Std) by Strategy and Measurement Type\n")
+        
+        # Get all unique strategies and x_values
+        strategies = combined_results['selection_strategy'].unique()
+        x_values = sorted(combined_results['x_value'].unique())
+        x_axis = args.x_axis.split('.')[-1]  
+
+        for metric in filtered_metrics:
+            # Extract measurement type from metric name
+            measurement_type = metric.split('_')[-1]  # e.g., "LVPW", "LVID", "IVS"
+            
+            print(f"### {measurement_type} MAE [cm]\n")
+            
+            # Build header
+            header = "| Strategy | " + " | ".join([f"{x}/256 Scan Lines" for x in x_values]) + " |"
+            separator = "|" + "|".join(["---"] * (len(x_values) + 1)) + "|"
+            
+            # First pass: compute all means to find minimum per column
+            strategy_means = {}  # {strategy: {x_val: (mean, std, formatted_str)}}
+            strategy_values = {}  # {strategy: {x_val: [values]}} for statistical tests
+            for strategy in STRATEGIES_TO_PLOT:
+                if strategy not in strategies:
+                    continue
+                strategy_means[strategy] = {}
+                strategy_values[strategy] = {}
+                for x_val in x_values:
+                    mask = (
+                        (combined_results['selection_strategy'] == strategy) & 
+                        (combined_results['x_value'] == x_val)
+                    )
+                    values = combined_results.loc[mask, metric].dropna()
+                    strategy_values[strategy][x_val] = values.values
+                    
+                    if len(values) > 0:
+                        mean = values.mean()
+                        std = values.std()
+                        strategy_means[strategy][x_val] = (mean, std, f"{mean:.3f} ± {std:.3f}")
+                    else:
+                        strategy_means[strategy][x_val] = (float('inf'), 0, "-")
+            
+            # Find minimum mean for each x_value
+            min_means = {}
+            for x_val in x_values:
+                min_mean = float('inf')
+                for strategy in strategy_means:
+                    if x_val in strategy_means[strategy]:
+                        mean = strategy_means[strategy][x_val][0]
+                        if mean < min_mean:
+                            min_mean = mean
+                min_means[x_val] = min_mean
+            
+            print(header)
+            print(separator)
+            
+            # Second pass: build rows with bold formatting for minimum values
+            for strategy in STRATEGIES_TO_PLOT:
+                if strategy not in strategies:
+                    continue
+                    
+                row_values = [STRATEGY_NAMES.get(strategy, strategy)]
+                
+                for x_val in x_values:
+                    if x_val in strategy_means[strategy]:
+                        mean, std, formatted = strategy_means[strategy][x_val]
+                        # Bold if this is the minimum (and not infinity/missing)
+                        if mean == min_means[x_val] and mean != float('inf'):
+                            row_values.append(f"**{formatted}**")
+                        else:
+                            row_values.append(formatted)
+                    else:
+                        row_values.append("-")
+                
+                print("| " + " | ".join(row_values) + " |")
+            
+            print()  # Empty line between tables
+            
+            # Perform Wilcoxon signed-rank test between TBIG and GIG
+            from scipy.stats import wilcoxon
+            
+            tbig_key = "downstream_task_selection"
+            gig_key = "greedy_entropy"
+            
+            if tbig_key in strategy_values and gig_key in strategy_values:
+                print(f"#### Statistical Comparison: TBIG vs GIG ({measurement_type})\n")
+                print("| # Scan Lines | Wilcoxon W | p-value | Significance |")
+                print("|---|---|---|---|")
+                
+                for x_val in x_values:
+                    tbig_vals = strategy_values.get(tbig_key, {}).get(x_val, np.array([]))
+                    gig_vals = strategy_values.get(gig_key, {}).get(x_val, np.array([]))
+                    
+                    # Ensure paired samples (same length)
+                    n_pairs = min(len(tbig_vals), len(gig_vals))
+                    
+                    if n_pairs >= 10:  # Wilcoxon needs reasonable sample size
+                        tbig_paired = tbig_vals[:n_pairs]
+                        gig_paired = gig_vals[:n_pairs]
+                        
+                        try:
+                            # Use 'wilcox' method for exact test when possible
+                            stat, p_value = wilcoxon(tbig_paired, gig_paired, alternative='two-sided')
+                            
+                            # Determine significance level
+                            if p_value < 0.001:
+                                sig = "***"
+                            elif p_value < 0.01:
+                                sig = "**"
+                            elif p_value < 0.05:
+                                sig = "*"
+                            else:
+                                sig = "n.s."
+                            
+                            print(f"| {x_val}/256 | {stat:.1f} | {p_value:.2e} | {sig} |")
+                        except ValueError as e:
+                            print(f"| {x_val}/256 | - | - | Error: {e} |")
+                    else:
+                        print(f"| {x_val}/256 | - | - | n < 10 |")
+                
+                print()
+                print("*Significance levels: *** p < 0.001, ** p < 0.01, * p < 0.05, n.s. = not significant*\n")
+
     else:
         print("No valid results found in any of the provided paths.")
