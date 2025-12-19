@@ -15,6 +15,16 @@ Here we provide an extended set of results to supplement those presented in the 
 | General Information Gain | 0.116 ± 0.039 | 0.081 ± 0.025 | 0.066 ± 0.020 |
 | Uniform Random | 0.125 ± 0.038 | 0.081 ± 0.029 | 0.064 ± 0.023 |
 
+#### Statistical Comparison: TBIG vs GIG (LVPW)
+
+*Significance levels: *** p < 0.001, ** p < 0.01, * p < 0.05, n.s. = not significant*
+
+| # Scan Lines | Wilcoxon W | p-value | Significance |
+|---|---|---|---|
+| 1/256 | 90.0 | 3.71e-09 | *** |
+| 3/256 | 3.0 | 8.88e-15 | *** |
+| 5/256 | 5.0 | 1.78e-14 | *** |
+
 ### LVID MAE [cm]
 
 | Strategy | 1/256 Scan Lines | 3/256 Scan Lines | 5/256 Scan Lines |
@@ -23,6 +33,14 @@ Here we provide an extended set of results to supplement those presented in the 
 | General Information Gain | 0.440 ± 0.155 | 0.281 ± 0.114 | 0.220 ± 0.086 |
 | Uniform Random | 0.537 ± 0.197 | 0.293 ± 0.110 | 0.211 ± 0.090 |
 
+#### Statistical Comparison: TBIG vs GIG (LVID)
+
+| # Scan Lines | Wilcoxon W | p-value | Significance |
+|---|---|---|---|
+| 1/256 | 56.0 | 1.15e-10 | *** |
+| 3/256 | 19.0 | 5.45e-13 | *** |
+| 5/256 | 4.0 | 1.24e-14 | *** |
+
 ### IVS MAE [cm]
 
 | Strategy | 1/256 Scan Lines | 3/256 Scan Lines | 5/256 Scan Lines |
@@ -30,3 +48,11 @@ Here we provide an extended set of results to supplement those presented in the 
 | Task-Based Information Gain | **0.129 ± 0.056** | **0.078 ± 0.041** | **0.064 ± 0.038** |
 | General Information Gain | 0.190 ± 0.060 | 0.117 ± 0.052 | 0.093 ± 0.044 |
 | Uniform Random | 0.227 ± 0.069 | 0.125 ± 0.047 | 0.092 ± 0.040 |
+
+#### Statistical Comparison: TBIG vs GIG (IVS)
+
+| # Scan Lines | Wilcoxon W | p-value | Significance |
+|---|---|---|---|
+| 1/256 | 58.0 | 1.44e-10 | *** |
+| 3/256 | 44.0 | 2.63e-11 | *** |
+| 5/256 | 27.0 | 2.24e-12 | *** |
