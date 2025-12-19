@@ -2,7 +2,7 @@ action_selection:
   n_possible_actions: 256
   n_actions: 5
   shape: [256, 256]
-  selection_strategy: "downstream_task_selection" # "downstream_gradient_descent" | "downstream_propagation" | "greedy_entropy" | "uniform_random" | "covariance"
+  selection_strategy: "downstream_task_selection" #  | "greedy_entropy" | "uniform_random" | "covariance"
   kwargs:
     # downstream_task_key: "echonetlvh_segmentation"
     downstream_task_key: "echonetlvh_measurement"

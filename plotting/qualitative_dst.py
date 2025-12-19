@@ -33,8 +33,8 @@ from zea import Config
 
 # Strategy names for display
 STRATEGY_NAMES = {
-    "downstream_task_selection": "Measurement Information Gain",
-    "greedy_entropy": "Tissue Information Gain",
+    "downstream_task_selection": "Task-Based Information Gain",
+    "greedy_entropy": "General Information Gain",
     "uniform_random": "Uniform Random",
     "equispaced": "Equispaced",
 }
@@ -226,6 +226,125 @@ def load_run_data_from_metrics(run_path):
     }
 
     return data
+
+
+def create_single_measurement_type_gifs_from_metrics(
+    run_path,
+    save_dir,
+    downstream_task,
+    measurement_type,
+    agent_config=None,
+    target_file_hash=None,
+):
+    """Create single measurement type GIFs using data from metrics.npz."""
+    # Load data from metrics
+    data = load_run_data_from_metrics(run_path)
+    if data is None:
+        print(f"Failed to load data from {run_path}")
+        return None
+
+    # Extract relevant arrays
+    targets = data["targets"]
+    reconstructions = data["reconstructions"]
+    measurements = data["measurements"]
+    masks = data["masks"]
+    belief_distributions = data["belief_distributions"]
+
+    # Downstream task outputs
+    targets_dst = data["segmentation_mask_targets"]
+    reconstructions_dst = data["segmentation_mask_reconstructions"]
+    beliefs_dst = data["segmentation_mask_beliefs"]
+
+    if targets_dst is None or reconstructions_dst is None or beliefs_dst is None:
+        print(f"Missing downstream task outputs in {run_path}")
+        return None
+
+    # Convert to proper format and squeeze where needed
+    targets = np.squeeze(targets, axis=-1) if targets.ndim > 3 else targets
+    measurements = (
+        np.squeeze(measurements, axis=-1) if measurements.ndim > 3 else measurements
+    )
+    reconstructions = (
+        np.squeeze(reconstructions, axis=-1)
+        if reconstructions.ndim > 3
+        else reconstructions
+    )
+    masks = np.squeeze(masks, axis=-1) if masks.ndim > 3 else masks
+
+    # For belief distributions, we need the posterior mean as reconstructions
+    # and posterior std for uncertainty visualization
+    if belief_distributions.ndim == 5:  # (frames, particles, h, w, c)
+        posterior_mean = np.mean(belief_distributions, axis=1)  # Average over particles
+        posterior_std = np.std(belief_distributions, axis=1)  # Std over particles
+        reconstructions = (
+            np.squeeze(posterior_mean, axis=-1)
+            if posterior_mean.ndim > 3
+            else posterior_mean
+        )
+        posterior_std = (
+            np.squeeze(posterior_std, axis=-1)
+            if posterior_std.ndim > 3
+            else posterior_std
+        )
+    else:
+        posterior_std = np.zeros_like(reconstructions)
+
+    # Squeeze downstream task outputs
+    targets_dst = np.squeeze(targets_dst)
+    reconstructions_dst = np.squeeze(reconstructions_dst)
+    beliefs_dst = np.squeeze(beliefs_dst)
+
+    # Create dummy saliency maps (zeros) since they're not in metrics.npz
+    saliency_maps = np.zeros_like(targets)
+
+    # Use config from data if agent_config not provided
+    if agent_config is None:
+        agent_config = data["config"]
+
+    # Normalize targets to expected range for downstream task input
+    # Assuming targets are in uint8 range [0, 255], convert to [-1, 1]
+    targets_normalized = zea.utils.translate(
+        targets, range_from=(0, 255), range_to=(-1, 1)
+    )
+    reconstructions_normalized = zea.utils.translate(
+        reconstructions, range_from=(0, 255), range_to=(-1, 1)
+    )
+    measurements_normalized = zea.utils.translate(
+        measurements, range_from=(0, 255), range_to=(-1, 1)
+    )
+
+    # Call the single measurement type GIF function
+    from ulsa.io_utils import plot_single_measurement_type_gifs
+
+    plot_single_measurement_type_gifs(
+        save_dir,
+        targets_normalized,  # shape (num_frames, H, W)
+        measurements_normalized,  # shape (num_frames, H, W)
+        reconstructions_normalized,  # shape (num_frames, H, W)
+        masks,
+        posterior_std,  # shape (num_frames, H, W)
+        downstream_task,
+        reconstructions_dst,  # segmentation masks
+        beliefs_dst,  # shape (frames, particles, h, w, c)
+        targets_dst,  # segmentation masks
+        saliency_maps,  # shape (num_frames, H, W)
+        agent_config.io_config,
+        measurement_type,  # Single measurement type: "LVPW", "LVID", or "IVS"
+        dpi=150,
+        scan_convert_order=0,
+        scan_convert_resolution=0.1,
+        interpolation_matplotlib="nearest",
+        image_range=(-1, 1),
+        context="styles/darkmode.mplstyle",
+        drop_first_n_frames=0,
+        window_size=7,
+        no_measurement_color="gray",
+        show_reconstructions_in_timeseries=True,
+        target_file_hash=data["target_file_hash"],
+    )
+
+    print(f"Created {measurement_type} single measurement type GIFs in {save_dir}")
+    return save_dir
 
 
 def create_downstream_task_visualization_from_metrics(
@@ -701,7 +820,8 @@ def create_combined_time_series_plot(
             if all_lengths_for_ylim:
                 y_min, y_max = min(all_lengths_for_ylim), max(all_lengths_for_ylim)
                 y_range = y_max - y_min
-                shared_ylim = (y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+                # Add extra room at the top (20% instead of 10%) for MAE text
+                shared_ylim = (y_min - 0.1 * y_range, y_max + 0.2 * y_range)
             else:
                 shared_ylim = (0, 1)
 
@@ -928,17 +1048,18 @@ def create_combined_time_series_plot_multiple_sequences(
         measurement_type = measurement_types_to_plot[0]
 
     with plt.style.context(context):
-        # Adjust figure size based on number of sequences
+        # Adjust figure size to 2/3 of IEEE page width (7.16 * 2/3 ≈ 4.77 inches)
+        width = 4.77
         height = 1 * n_sequences
-        # Remove sharex=True to allow independent x-axes for each row
-        fig, axes = plt.subplots(n_sequences, 2, figsize=(7.16, height))
+        fig, axes = plt.subplots(n_sequences, 2, figsize=(width, height))
 
         # Handle single row case
         if n_sequences == 1:
             axes = axes.reshape(1, -1)
 
-        # Store legend information for each row
-        row_legend_data = []
+        # Store legend information
+        legend_handles = None
+        legend_labels = None
 
         color = MEASUREMENT_COLORS[measurement_type]
 
@@ -1003,7 +1124,8 @@ def create_combined_time_series_plot_multiple_sequences(
             if all_lengths_for_ylim:
                 y_min, y_max = min(all_lengths_for_ylim), max(all_lengths_for_ylim)
                 y_range = y_max - y_min
-                shared_ylim = (y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+                # Add extra room at the top (20% instead of 10%) for MAE text
+                shared_ylim = (y_min - 0.1 * y_range, y_max + 0.2 * y_range)
             else:
                 shared_ylim = (0, 1)
 
@@ -1050,6 +1172,14 @@ def create_combined_time_series_plot_multiple_sequences(
                         color=color,
                         alpha=0.2,
                     )
+
+            # Store legend handles and labels (only need to do this once)
+            if row_idx == 0 and legend_handles is None:
+                legend_handles = [line1, line2]
+                legend_labels = ["Target", "Reconstruction"]
+                if fill_patch is not None:
+                    legend_handles.append(fill_patch)
+                    legend_labels.append("±1σ")
 
             # Add MAE text for strategy 1
             if not np.isnan(mae1):
@@ -1128,45 +1258,37 @@ def create_combined_time_series_plot_multiple_sequences(
             ax1.grid(True, alpha=0.3)
             ax2.grid(True, alpha=0.3)
 
-            # Y-axis label only on left column
-            ax1.set_ylabel(f"{measurement_type} [cm]", fontsize=9)
+            # Y-axis label: Measurement type only on left column for middle row
+            if row_idx == n_sequences // 2:  # Middle row
+                ax1.set_ylabel(f"{measurement_type} [cm]", fontsize=9)
+            else:
+                ax1.set_ylabel("")  # Empty label for other rows
 
             # X-axis label on all axes since they have independent scales
-            ax1.set_xlabel("Frame", fontsize=10)
-            ax2.set_xlabel("Frame", fontsize=10)
+            ax1.set_xlabel("Frame", fontsize=9)
+            ax2.set_xlabel("Frame", fontsize=9)
 
             # Format y-axis to show max 1 decimal place
             ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
             ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
 
-            # Store legend data for this row (only need to do this once)
-            if row_idx == 0:
-                legend_handles = [line1, line2]
-                legend_labels = ["Target", "Reconstruction"]
-                if fill_patch is not None:
-                    legend_handles.append(fill_patch)
-                    legend_labels.append("±1σ")
-                row_legend_data.append((legend_handles, legend_labels))
-
         # Add column titles
-        axes[0, 0].set_title(strategy1_name, fontsize=10, pad=10)
-        axes[0, 1].set_title(strategy2_name, fontsize=10, pad=10)
+        axes[0, 0].set_title(strategy1_name, fontsize=9, pad=8)
+        axes[0, 1].set_title(strategy2_name, fontsize=9, pad=8)
 
-        # Adjust layout parameters based on number of sequences
+        # Adjust layout to make room for horizontal legend at top and patient labels
         plt.tight_layout()
-        plt.subplots_adjust(top=0.90, wspace=0.15, hspace=0.4, right=0.8, left=0.1)
+        plt.subplots_adjust(top=0.80, wspace=0.2, hspace=0.4, left=0.12, right=0.93)
 
-        # Add legend if we have legend data
-        if row_legend_data:
-            legend_handles, legend_labels = row_legend_data[0]
-
-            # Position legend in the center right
+        # Add horizontal legend at the top
+        if legend_handles is not None:
             fig.legend(
                 legend_handles,
                 legend_labels,
-                loc="center left",
-                bbox_to_anchor=(0.82, 0.5),
-                fontsize=10,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.96),
+                ncol=len(legend_labels),  # Arrange horizontally
+                fontsize=9,
                 framealpha=0.9,
             )
 
@@ -1204,6 +1326,11 @@ if __name__ == "__main__":
         default=2,
         help="Number of different sequences to plot for comparison (default: 2)",
     )
+    parser.add_argument(
+        "--create-gifs",
+        action="store_true",
+        help="Create single measurement type GIFs for each strategy",
+    )
     args = parser.parse_args()
 
     # Create save directory
@@ -1211,12 +1338,18 @@ if __name__ == "__main__":
     save_root.mkdir(parents=True, exist_ok=True)
 
     # Define sweep paths - include the path with measurement-specific sweeps
+    # Original sweep paths with 3/256 and 5/256
     SWEEP_PATHS = [
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_27_234604_304986",
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_28_005533_658322",
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_28_020347_562409",
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_28_085132_599359",
     ]
+
+    # SWEEP_PATHS = [
+    #     "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_28_165310_165677",
+    #     "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_29_154154_763351",
+    # ]
 
     # Strategies to compare
     strategies_to_compare = ["downstream_task_selection", "greedy_entropy"]
@@ -1249,8 +1382,13 @@ if __name__ == "__main__":
     else:
         measurement_types_to_plot = [args.measurement_to_plot]
 
-    # Process each strategy - now selecting multiple runs
+    # Initialize downstream task
+    downstream_task = EchoNetLVHMeasurement()
+
+    # Process each strategy - selecting multiple runs for time series comparison
     strategy_data_dict = {}
+    strategy_run_paths = {}  # Store run paths for GIF creation
+
     for strategy in strategies_to_compare:
         print(f"\nProcessing strategy: {strategy}")
 
@@ -1266,6 +1404,9 @@ if __name__ == "__main__":
         if not run_paths:
             print(f"No suitable runs found for strategy {strategy}")
             continue
+
+        # Store run paths for potential GIF creation
+        strategy_run_paths[strategy] = run_paths
 
         # Process each run
         strategy_viz_data_list = []
@@ -1317,9 +1458,60 @@ if __name__ == "__main__":
             measurement_types_to_plot=measurement_types_to_plot,
         )
 
+    # Create GIFs if requested - using the SAME runs as the time series plots
+    if args.create_gifs:
+        print(
+            "\nCreating single measurement type GIFs from the same runs used for time series..."
+        )
+
+        for strategy in strategies_to_compare:
+            if strategy not in strategy_run_paths:
+                print(f"No run paths available for strategy {strategy}")
+                continue
+
+            print(f"\nCreating GIFs for strategy: {strategy}")
+            run_paths = strategy_run_paths[strategy]
+
+            # Create GIFs for each run and each measurement type
+            for i, run_path in enumerate(run_paths):
+                for measurement_type in measurement_types_to_plot:
+                    gif_save_dir = (
+                        save_root
+                        / f"gifs_{strategy}_{measurement_type}_seq{i + 1}_x{args.x_value}"
+                    )
+                    gif_save_dir.mkdir(parents=True, exist_ok=True)
+
+                    print(
+                        f"Creating {measurement_type} GIFs for {strategy} sequence {i + 1}..."
+                    )
+
+                    try:
+                        result_dir = create_single_measurement_type_gifs_from_metrics(
+                            run_path,
+                            gif_save_dir,
+                            downstream_task,
+                            measurement_type,
+                        )
+                        if result_dir:
+                            print(
+                                f"Successfully created {measurement_type} GIFs for sequence {i + 1} in {result_dir}"
+                            )
+                        else:
+                            print(
+                                f"Failed to create {measurement_type} GIFs for {strategy} sequence {i + 1}"
+                            )
+                    except Exception as e:
+                        print(
+                            f"Error creating {measurement_type} GIFs for {strategy} sequence {i + 1}: {e}"
+                        )
+
     print(f"\nQualitative plots saved to {save_root}")
     print(f"Compared strategies: {[STRATEGY_NAMES[s] for s in strategies_to_compare]}")
     print(f"X-value: {args.x_value}")
     print(f"Target measurement type: {args.target_measurement_type}")
     print(f"Plotted measurement type(s): {measurement_types_to_plot}")
     print(f"Number of sequences: {args.n_sequences}")
+    if args.create_gifs:
+        print(
+            f"Single measurement type GIFs created for each strategy, sequence, and measurement type using the same runs as time series plots"
+        )

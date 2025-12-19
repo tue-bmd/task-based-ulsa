@@ -54,43 +54,6 @@ class DownstreamTaskSelection(GreedyEntropy):
             downstream_task_registry[downstream_task_key]
         )(batch_size=4, **kwargs)
 
-    def compute_output_and_saliency_propagation_hutchinson(self, particles, key):
-        num_hutchinson_samples = 5
-
-        z_squared = ops.zeros(self.downstream_task.output_shape)
-        for i in range(num_hutchinson_samples):  # TODO: vmap
-            subkey = jax.random.fold_in(key, i)
-            v = jax.random.normal(
-                subkey, self.downstream_task
-            )  # TODO: downstream task output shape?
-            # vjp returns a function that computes J^T v
-            _, vjp_fun = jax.vjp(self.downstream_task.call_differentiable, particles)
-            jt_v = vjp_fun(v)[0]  # [0] to get the input tangent
-            z_squared += jt_v**2
-
-        posterior_variance = ops.expand_dims(ops.var(particles, axis=0), axis=0)
-
-        return (
-            posterior_variance * z_squared
-        )  # TODO: where does z_squared get rid of the particle dim?
-
-    def compute_output_and_saliency_propagation_summed(self, particles):
-        autograd = AutoGrad()
-
-        def call_model(model_input):
-            model_output = self.downstream_task.call_differentiable(model_input)
-            return ops.sum(model_output)
-
-        autograd.set_function(call_model)
-        echonet_grad_and_value_fn = autograd.get_gradient_and_value_jit_fn()
-        grads, _ = echonet_grad_and_value_fn(particles)
-
-        posterior_variance = ops.expand_dims(ops.var(particles, axis=0), axis=0)
-        mean_absolute_jacobian = ops.expand_dims(
-            ops.mean(ops.abs(grads), axis=0), axis=0
-        )
-        return posterior_variance * mean_absolute_jacobian
-
     def compute_output_and_saliency_propagation(self, particles):
         """
         Should only be used for downstream tasks with scalar output.

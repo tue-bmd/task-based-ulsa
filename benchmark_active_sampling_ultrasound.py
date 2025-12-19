@@ -557,7 +557,7 @@ def run_benchmark(
 
     run_level_subkey = initial_run_key.copy()
 
-    dataset = Dataset(target_dir, key=data_type, validate=validate_dataset)
+    dataset = Dataset(target_dir, key=data_type, validate=validate_dataset, search_file_tree_kwargs={"write": False})
 
     if limit_n_samples is None:
         limit_n_samples = len(dataset)

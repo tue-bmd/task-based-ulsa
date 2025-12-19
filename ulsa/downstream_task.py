@@ -285,15 +285,13 @@ class EchoNetSegmentation(DifferentiableDownstreamTask):
         return reconstructions
 
 
-# TODO: this class and EchoNetSegmentation have a lot in common,
-#       maybe could make a shared 'SegmentationModel' parent
 @downstream_task_registry(name="echonetlvh_segmentation")
 class EchoNetLVHSegmentation(DifferentiableDownstreamTask):
     def __init__(
         self,
         batch_size=4,
-        measurements_file="/mnt/z/Ultrasound-BMd/data/USBMD_datasets/echonetlvh/MeasurementsList.csv",
-        cone_parameters_file="/mnt/z/Ultrasound-BMd/data/USBMD_datasets/echonetlvh/cone_parameters.csv",
+        measurements_file="/mnt/z/USBMD_datasets/echonetlvh/MeasurementsList.csv", # NOTE: see https://github.com/tue-bmd/zea/tree/main/zea/data/convert/echonetlvh
+        cone_parameters_file="/mnt/z/USBMD_datasets/echonetlvh/cone_parameters.csv",
     ):
         super().__init__()
 

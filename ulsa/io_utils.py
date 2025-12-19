@@ -787,6 +787,354 @@ def plot_downstream_task_beliefs(
     )
 
 
+def plot_single_measurement_type_gifs(
+    save_dir,
+    targets,  # shape (num_frames, H, W)
+    measurements,  # shape (num_frames, H, W)
+    reconstructions,  # shape (num_frames, H, W)
+    masks,
+    posterior_std,  # shape (num_frames, H, W)
+    downstream_task,
+    reconstructions_dst,
+    beliefs_dst,  # shape (30, 4, 224, 224, 4)
+    targets_dst,
+    saliency_maps,  # shape (num_frames, H, W) or (num_frames, H, W, 1)
+    io_config,
+    measurement_type,  # Single measurement type: "LVPW", "LVID", or "IVS"
+    dpi=150,
+    scan_convert_order=0,
+    scan_convert_resolution=0.1,
+    interpolation_matplotlib="nearest",
+    image_range=(-1, 1),
+    context="styles/darkmode.mplstyle",
+    drop_first_n_frames=0,
+    window_size=7,
+    no_measurement_color="gray",
+    show_reconstructions_in_timeseries=True,
+    target_file_hash=None,
+):
+    """
+    Generate 3 separate GIFs for a single measurement type:
+    1. Target images with time series
+    2. Measurements with time series
+    3. Density heatmap with time series
+
+    Args:
+        measurement_type (str): One of "LVPW", "LVID", "IVS"
+        All other args same as plot_downstream_task_output_for_presentation
+    """
+    if measurement_type not in ["LVPW", "LVID", "IVS"]:
+        raise ValueError(
+            f"measurement_type must be one of ['LVPW', 'LVID', 'IVS'], got {measurement_type}"
+        )
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    num_frames = targets.shape[0]
+
+    # Process images same as original function
+    targets_with_mask = downstream_task.postprocess_for_visualization(
+        targets, targets_dst
+    )
+    reconstructions_with_mask = downstream_task.postprocess_for_visualization(
+        reconstructions, reconstructions_dst
+    )
+
+    measurements = zea.utils.translate(
+        ops.clip(measurements, -1, 1), range_to=image_range
+    )
+    measurements = keras.ops.where(
+        masks > 0, measurements, color_to_value(image_range, no_measurement_color)
+    )
+    measurements = postprocess_agent_results(
+        measurements,
+        io_config,
+        scan_convert_order=0,
+        drop_first_n_frames=drop_first_n_frames,
+        image_range=image_range,
+        scan_convert_resolution=scan_convert_resolution,
+    )
+
+    # rescale DST outputs to get correct aspect ratio (same as plot_downstream_task_output_for_presentation)
+    aspect_ratio = ops.shape(measurements)[2] / ops.shape(measurements)[1]
+    new_shape = (
+        ops.shape(targets_with_mask)[1],
+        int(ops.shape(targets_with_mask)[1] * aspect_ratio),
+    )
+    targets_with_mask = ops.image.resize(
+        targets_with_mask, new_shape, interpolation="nearest"
+    )
+    reconstructions_with_mask = ops.image.resize(
+        reconstructions_with_mask, new_shape, interpolation="nearest"
+    )
+
+    # Create density heatmap
+    heatmap = get_heatmap(
+        masks, io_config, cmap="inferno", window_size=window_size, sigma=None
+    )
+    offset = max(window_size, drop_first_n_frames)
+    if offset > len(heatmap):
+        offset = 0
+        log.warning(
+            f"Heatmap sequence is not long enough to cut off {offset} frames. Setting to 0."
+        )
+    heatmap = heatmap[offset:]
+
+    # Compute measurement line lengths for the specified measurement type only
+    measurement_color = {"LVPW": "yellow", "LVID": "magenta", "IVS": "cyan"}[
+        measurement_type
+    ]
+
+    def compute_line_length(bottom_coords, top_coords):
+        """Compute Euclidean distance between bottom and top coordinates"""
+        if bottom_coords is None or top_coords is None:
+            return np.nan
+        if target_file_hash is None:
+            return np.sqrt(np.sum((bottom_coords - top_coords) ** 2))
+        else:
+            return downstream_task.get_distance_in_cm(
+                target_file_hash, bottom_coords, top_coords
+            )
+
+    # Compute line lengths for all frames
+    target_line_lengths = []
+    belief_line_lengths_mean = []
+    belief_line_lengths_std = []
+
+    for frame_idx in range(num_frames):
+        # Target measurements
+        try:
+            target_bottom, target_top = downstream_task.outputs_to_coordinates(
+                targets_dst[frame_idx : frame_idx + 1], measurement_type
+            )
+            target_length = compute_line_length(target_bottom, target_top)
+            target_line_lengths.append(target_length)
+        except:
+            target_line_lengths.append(np.nan)
+
+        # Belief measurements (compute for all 4 beliefs) - only if showing reconstructions
+        if show_reconstructions_in_timeseries:
+            try:
+                belief_lengths = []
+                for belief_idx in range(beliefs_dst.shape[1]):  # 4 beliefs
+                    belief_bottom, belief_top = downstream_task.outputs_to_coordinates(
+                        beliefs_dst[frame_idx, belief_idx : belief_idx + 1],
+                        measurement_type,
+                    )
+                    belief_length = compute_line_length(belief_bottom, belief_top)
+                    if not np.isnan(belief_length):
+                        belief_lengths.append(belief_length)
+
+                if belief_lengths:
+                    belief_mean = np.mean(belief_lengths)
+                    belief_std = (
+                        np.std(belief_lengths) if len(belief_lengths) > 1 else 0.0
+                    )
+                    belief_line_lengths_mean.append(belief_mean)
+                    belief_line_lengths_std.append(belief_std)
+                else:
+                    belief_line_lengths_mean.append(np.nan)
+                    belief_line_lengths_std.append(np.nan)
+            except:
+                belief_line_lengths_mean.append(np.nan)
+                belief_line_lengths_std.append(np.nan)
+
+    def create_timeseries_plot(ax_timeseries, frame_idx):
+        """Create single measurement type time series plot"""
+        frame_indices = np.arange(num_frames)
+
+        # Plot target line lengths
+        target_lengths = np.array(target_line_lengths)
+        valid_target = ~np.isnan(target_lengths)
+        ax_timeseries.plot(
+            frame_indices[valid_target],
+            target_lengths[valid_target],
+            color=measurement_color,
+            linestyle="-",
+            linewidth=2,
+            label="Target",
+            alpha=0.8,
+        )
+
+        # Only plot belief/reconstruction lines if enabled
+        if show_reconstructions_in_timeseries:
+            belief_means = np.array(belief_line_lengths_mean)
+            belief_stds = np.array(belief_line_lengths_std)
+            valid_beliefs = ~np.isnan(belief_means)
+
+            ax_timeseries.plot(
+                frame_indices[valid_beliefs],
+                belief_means[valid_beliefs],
+                color=measurement_color,
+                linestyle="--",
+                linewidth=2,
+                label="Beliefs",
+                alpha=0.8,
+            )
+
+            # Add error bars for standard deviation
+            ax_timeseries.fill_between(
+                frame_indices[valid_beliefs],
+                belief_means[valid_beliefs] - belief_stds[valid_beliefs],
+                belief_means[valid_beliefs] + belief_stds[valid_beliefs],
+                color=measurement_color,
+                alpha=0.2,
+            )
+
+        # Add vertical line for current frame
+        ax_timeseries.axvline(
+            x=frame_idx, color="white", linestyle=":", linewidth=2, alpha=0.8
+        )
+
+        # Set labels and formatting
+        unit = "[cm]" if target_file_hash is not None else "[pixels]"
+        ax_timeseries.set_ylabel(f"{measurement_type} {unit}", fontsize=12)
+        ax_timeseries.set_xlabel("Frame", fontsize=12)
+        if show_reconstructions_in_timeseries:
+            ax_timeseries.legend(loc="upper right", fontsize=10)
+        ax_timeseries.grid(True, alpha=0.3)
+        ax_timeseries.set_xlim(0, num_frames - 1)
+        ax_timeseries.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, p: f"{x:.2f}")
+        )
+
+        # Set y-limits based on measurement data
+        measurement_lengths = [l for l in target_line_lengths if not np.isnan(l)]
+
+        if show_reconstructions_in_timeseries:
+            means = np.array(belief_line_lengths_mean)
+            stds = np.array(belief_line_lengths_std)
+            valid = ~np.isnan(means) & ~np.isnan(stds)
+            measurement_lengths.extend((means[valid] + stds[valid]).tolist())
+            measurement_lengths.extend((means[valid] - stds[valid]).tolist())
+
+        if measurement_lengths:
+            y_min, y_max = min(measurement_lengths), max(measurement_lengths)
+            y_range = y_max - y_min
+            ax_timeseries.set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+
+    def create_frame_with_timeseries(
+        frame_idx, left_image, left_title, left_cmap="gray"
+    ):
+        """Create frame with left image and right timeseries"""
+        with plt.style.context(context):
+            # Create figure with appropriate size
+            fig = plt.figure(figsize=(12, 6), dpi=dpi)
+
+            # Use a simple approach: create axes with specific positions
+            # Left image: takes up left 30% of width, full height
+            ax_left = fig.add_axes(
+                [0.05, 0.1, 0.25, 0.8]
+            )  # [left, bottom, width, height]
+
+            # Right timeseries: takes up right 65% of width, but only middle 50% of height
+            ax_timeseries = fig.add_axes(
+                [0.35, 0.3, 0.6, 0.4]
+            )  # centered vertically, shorter
+
+            if left_cmap == "gray":
+                ax_left.imshow(
+                    left_image,
+                    cmap="gray",
+                    interpolation=interpolation_matplotlib,
+                    vmin=0,
+                    vmax=255,
+                )
+            else:
+                ax_left.imshow(left_image, interpolation=interpolation_matplotlib)
+            ax_left.set_title(left_title, fontsize=14)
+            ax_left.axis("off")
+
+            # Create the time series plot
+            create_timeseries_plot(ax_timeseries, frame_idx)
+
+            # Save frame to buffer
+            from io import BytesIO
+
+            buf = BytesIO()
+            plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+            buf.seek(0)
+            plt.close(fig)
+
+            # Convert to numpy array
+            import PIL.Image
+
+            img = PIL.Image.open(buf)
+            return np.array(img)
+
+    # Generate frames for each of the 3 GIFs
+    print(f"Creating {measurement_type} visualization GIFs...")
+
+    # 1. Target frames
+    print("Creating target frames...")
+    target_frames = []
+    for frame_idx in range(num_frames):
+        frame = create_frame_with_timeseries(
+            frame_idx,
+            targets_with_mask[frame_idx],
+            f"Target",
+            left_cmap="rgb",
+        )
+        target_frames.append(frame)
+        print(f"Target frame {frame_idx + 1}/{num_frames}", end="\r")
+    print()
+
+    # 2. Measurement frames
+    print("Creating measurement frames...")
+    measurement_frames = []
+    for frame_idx in range(num_frames):
+        frame = create_frame_with_timeseries(
+            frame_idx,
+            measurements[frame_idx],
+            f"Measurements",
+            left_cmap="gray",
+        )
+        measurement_frames.append(frame)
+        print(f"Measurement frame {frame_idx + 1}/{num_frames}", end="\r")
+    print()
+
+    # 3. Heatmap frames (adjust for offset)
+    print("Creating heatmap frames...")
+    heatmap_frames = []
+    heatmap_num_frames = len(heatmap)
+    for frame_idx in range(heatmap_num_frames):
+        # Adjust frame index for timeseries to account for offset
+        timeseries_frame_idx = frame_idx + offset
+        frame = create_frame_with_timeseries(
+            timeseries_frame_idx,
+            heatmap[frame_idx],
+            f"Density Heatmap",
+            left_cmap="rgb",
+        )
+        heatmap_frames.append(frame)
+        print(f"Heatmap frame {frame_idx + 1}/{heatmap_num_frames}", end="\r")
+    print()
+
+    # Save all 3 GIFs
+    import imageio
+
+    fps = io_config.gif_fps if hasattr(io_config, "gif_fps") else 10
+
+    # Save target gif
+    target_gif_path = save_dir / f"{measurement_type.lower()}_target_timeseries.gif"
+    imageio.mimsave(target_gif_path, target_frames, fps=fps, loop=0)
+    print(f"Saved target visualization to {target_gif_path}")
+
+    # Save measurement gif
+    measurement_gif_path = (
+        save_dir / f"{measurement_type.lower()}_measurements_timeseries.gif"
+    )
+    imageio.mimsave(measurement_gif_path, measurement_frames, fps=fps, loop=0)
+    print(f"Saved measurement visualization to {measurement_gif_path}")
+
+    # Save heatmap gif
+    heatmap_gif_path = save_dir / f"{measurement_type.lower()}_heatmap_timeseries.gif"
+    imageio.mimsave(heatmap_gif_path, heatmap_frames, fps=fps, loop=0)
+    print(f"Saved heatmap visualization to {heatmap_gif_path}")
+
+    print(f"All {measurement_type} visualization GIFs saved successfully!")
+
+
 def plot_downstream_task_output_for_presentation(
     save_dir,
     targets,  # shape (num_frames, H, W)

@@ -34,8 +34,8 @@ STRATEGY_COLORS = {
 }
 
 STRATEGY_NAMES = {
-    "downstream_task_selection": "Measurement Information Gain",
-    "greedy_entropy": "Tissue Information Gain",
+    "downstream_task_selection": "Task-Based Information Gain",
+    "greedy_entropy": "General Information Gain",
     # "greedy_entropy": "Active Perception",
     "uniform_random": "Uniform Random",
     "equispaced": "Equispaced",
@@ -848,6 +848,7 @@ def plot_strategy_comparison_scatter(
     y_axis_label=None,
     plot_title=None,
     file_ext=".pdf",
+    context="styles/ieee-tmi.mplstyle",
 ):
     """
     Scatter plot comparing metric values for two strategies across all samples.
@@ -877,52 +878,75 @@ def plot_strategy_comparison_scatter(
         if n == 0:
             continue
 
-        plt.figure(figsize=(5, 5))
-        plt.scatter(
-            x_samples[:n],
-            y_samples[:n],
-            alpha=0.6,
-            color="#1f77b4",
-            s=20,
-            edgecolors="none",
-        )
+        with plt.style.context(context):
+            # Set figure size to 1/3 of IEEE page width (7.16 / 3 ≈ 2.39 inches)
+            width = 2.39
+            height = 2.39  # Square aspect ratio
+            fig, ax = plt.subplots(figsize=(width, height))
 
-        # Plot y=x reference line
-        min_val = min(min(x_samples[:n]), min(y_samples[:n]))
-        max_val = max(max(x_samples[:n]), max(y_samples[:n]))
-        plt.plot(
-            [min_val, max_val],
-            [min_val, max_val],
-            "k--",
-            alpha=0.7,
-            linewidth=1,
-            label="y = x",
-        )
+            ax.scatter(
+                x_samples[:n],
+                y_samples[:n],
+                alpha=0.6,
+                color="#1f77b4",
+                s=15,  # Slightly smaller points for smaller figure
+                edgecolors="none",
+            )
 
-        # Calculate correlation coefficient
-        import scipy.stats
+            # Plot y=x reference line
+            min_val = min(min(x_samples[:n]), min(y_samples[:n]))
+            max_val = max(max(x_samples[:n]), max(y_samples[:n]))
+            ax.plot(
+                [min_val, max_val],
+                [min_val, max_val],
+                "k--",
+                alpha=0.7,
+                linewidth=1,
+                label="y = x",
+            )
 
-        r, p_value = scipy.stats.pearsonr(x_samples[:n], y_samples[:n])
+            # Calculate correlation coefficient
+            import scipy.stats
 
-        plt.xlabel(
-            x_axis_label
-            or f"{STRATEGY_NAMES.get(strategy_x, strategy_x)}\n{METRIC_NAMES.get(metric, metric)}",
-            fontsize=9,
-        )
-        plt.ylabel(
-            y_axis_label
-            or f"{STRATEGY_NAMES.get(strategy_y, strategy_y)}\n{METRIC_NAMES.get(metric, metric)}",
-            fontsize=9,
-        )
-        plt.title(
-            plot_title
-            or f"{METRIC_NAMES.get(metric, metric)} Comparison (n_lines={x_val})\nr = {r:.3f}, p = {p_value:.3f}",
-            fontsize=10,
-        )
-        plt.legend(fontsize=8)
-        plt.grid(True, alpha=0.3)
-        plt.tick_params(axis="both", labelsize=8)
-        plt.tight_layout()
+            r, p_value = scipy.stats.pearsonr(x_samples[:n], y_samples[:n])
+
+            # Map strategy names to abbreviated MAE labels
+            def get_axis_label(strategy_name):
+                if "General Information Gain" in STRATEGY_NAMES.get(
+                    strategy_name, strategy_name
+                ):
+                    return "GIG MAE [cm]"
+                elif "Task-Based Information Gain" in STRATEGY_NAMES.get(
+                    strategy_name, strategy_name
+                ):
+                    return "TBIG MAE [cm]"
+                else:
+                    return STRATEGY_NAMES.get(strategy_name, strategy_name)
+
+            # Set axis labels with abbreviated names
+            ax.set_xlabel(
+                x_axis_label or get_axis_label(strategy_x),
+                fontsize=8,
+            )
+            ax.set_ylabel(
+                y_axis_label or get_axis_label(strategy_y),
+                fontsize=8,
+            )
+
+            # Style adjustments for IEEE format
+            ax.legend(fontsize=7, loc="best")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(axis="both", labelsize=8)
+
+            # Format axis to show appropriate number of decimal places
+            if "mae" in metric.lower():
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.2f}"))
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.2f}"))
+            else:
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.3f}"))
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.3f}"))
+
+            plt.tight_layout()
 
         save_path = os.path.join(
             save_root,
@@ -1070,11 +1094,15 @@ def plot_combined_measurement_violin(
                 handles,
                 labels,
                 loc="upper center",
-                bbox_to_anchor=(0.45, 0.94),  # Centered above the plots
-                # ncol=len(handles),  # Arrange horizontally
-                ncol=1,  # Arrange vertically
-                fontsize=10,
-                framealpha=0.9,
+                bbox_to_anchor=(0.5, 1.02),  # Position above the figure
+                bbox_transform=fig.transFigure,
+                ncol=len(handles),  # Arrange horizontally
+                fontsize=9,
+                framealpha=0.95,
+                fancybox=True,
+                borderpad=0.3,
+                columnspacing=1.0,
+                handletextpad=0.3,
             )
 
         # Adjust layout to accommodate legend above
@@ -1118,7 +1146,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--measurement-to-plot",
         type=str,
-        default="LVID",
+        default="all",
         choices=["LVPW", "LVID", "IVS", "all"],
         help="Which measurement type to plot (default: all)",
     )
@@ -1131,6 +1159,7 @@ if __name__ == "__main__":
         # "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/26_08_25_run4/sweep_2025_08_26_170059_245130",
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_28_165310_165677",
         "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/27_08_25_run1/sweep_2025_08_29_154154_763351",
+        "/mnt/z/Ultrasound-BMd/data/oisin/ULSA_out_dst/echonetlvh_downstream_task/16_12_25_run1/sweep_2025_12_16_211841_928869"
     ]
 
     METRICS = [
@@ -1138,6 +1167,8 @@ if __name__ == "__main__":
         "measurement_length_mae_LVID",
         "measurement_length_mae_IVS",
     ]
+
+    FILE_EXTS = ['.png'] #, '.pdf']
 
     TEMP_FILE = Path("/tmp/plot_downstream_task_results.pkl")
 
@@ -1175,7 +1206,7 @@ if __name__ == "__main__":
             measurement_types_to_plot = [args.measurement_to_plot]
 
         # Plot combined measurement violin plots with measurement filtering
-        for file_ext in [".png", ".pdf"]:
+        for file_ext in FILE_EXTS:
             plot_combined_measurement_violin(
                 combined_results,
                 save_root=args.save_root,
@@ -1197,7 +1228,7 @@ if __name__ == "__main__":
         else:
             filtered_metrics = METRICS
 
-        for file_ext in [".png", ".pdf"]:
+        for file_ext in FILE_EXTS:
             plot_violin_sweeps(
                 combined_results,
                 filtered_metrics,
@@ -1227,6 +1258,7 @@ if __name__ == "__main__":
                     strategy_x=strategy_x,
                     strategy_y=strategy_y,
                     save_root=args.save_root,
+                    file_ext=".png"
                 )
 
     else:
