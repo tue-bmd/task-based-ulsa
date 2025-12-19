@@ -1008,7 +1008,12 @@ def create_combined_time_series_plot_multiple_sequences(
     context="styles/ieee-tmi.mplstyle",
     measurement_types_to_plot=None,
 ):
-    """Create side-by-side time series plots for strategy comparison with multiple sequences."""
+    """Create side-by-side time series plots for strategy comparison with multiple sequences.
+    
+    Plots are organized as:
+    - Rows: grouped by sequence, with all measurement types for each sequence
+    - Columns: strategies (greedy_entropy on left, downstream_task_selection on right)
+    """
     if measurement_types_to_plot is None:
         measurement_types_to_plot = ["LVPW", "LVID", "IVS"]
 
@@ -1038,247 +1043,283 @@ def create_combined_time_series_plot_multiple_sequences(
         print("No data available for plotting")
         return
 
-    # For now, plot only the first measurement type if multiple are specified
-    if len(measurement_types_to_plot) > 1:
-        print(
-            f"Multiple measurement types specified, plotting only {measurement_types_to_plot[0]}"
-        )
-        measurement_type = measurement_types_to_plot[0]
-    else:
-        measurement_type = measurement_types_to_plot[0]
+    n_measurements = len(measurement_types_to_plot)
+    total_rows = n_sequences * n_measurements
 
     with plt.style.context(context):
-        # Adjust figure size to 2/3 of IEEE page width (7.16 * 2/3 ≈ 4.77 inches)
+        # Adjust figure size: 2/3 of IEEE page width, height based on total rows
         width = 4.77
-        height = 1 * n_sequences
-        fig, axes = plt.subplots(n_sequences, 2, figsize=(width, height))
+        row_height = 0.9  # Height per measurement row
+        sequence_spacing = 0.3  # Extra space between sequences for titles
+        height = total_rows * row_height + (n_sequences - 1) * sequence_spacing + 1.0  # Extra for legend and titles
+        
+        fig, axes = plt.subplots(total_rows, 2, figsize=(width, height))
 
         # Handle single row case
-        if n_sequences == 1:
+        if total_rows == 1:
             axes = axes.reshape(1, -1)
 
-        # Store legend information
+        # Store legend information (only need one set)
         legend_handles = None
         legend_labels = None
 
-        color = MEASUREMENT_COLORS[measurement_type]
+        # Track row indices for each sequence block (for adding sequence titles)
+        sequence_start_rows = []
 
-        for row_idx in range(n_sequences):
-            data1 = data1_list[row_idx]
-            data2 = data2_list[row_idx]
+        for seq_idx in range(n_sequences):
+            data1 = data1_list[seq_idx]
+            data2 = data2_list[seq_idx]
+            
+            sequence_start_rows.append(seq_idx * n_measurements)
 
-            # Get frame indices for both sequences (can be different lengths)
-            num_frames1 = len(data1["target_line_lengths"][measurement_type])
-            num_frames2 = len(data2["target_line_lengths"][measurement_type])
-            frame_indices1 = np.arange(num_frames1)
-            frame_indices2 = np.arange(num_frames2)
+            for meas_idx, measurement_type in enumerate(measurement_types_to_plot):
+                row_idx = seq_idx * n_measurements + meas_idx
+                color = MEASUREMENT_COLORS[measurement_type]
 
-            # Get data for both strategies to calculate shared y-limits and MAE
-            target_lengths1 = np.array(data1["target_line_lengths"][measurement_type])
-            recon_lengths1 = np.array(data1["recon_line_lengths"][measurement_type])
-            target_lengths2 = np.array(data2["target_line_lengths"][measurement_type])
-            recon_lengths2 = np.array(data2["recon_line_lengths"][measurement_type])
+                # Get frame indices for both sequences (can be different lengths)
+                num_frames1 = len(data1["target_line_lengths"][measurement_type])
+                num_frames2 = len(data2["target_line_lengths"][measurement_type])
+                frame_indices1 = np.arange(num_frames1)
+                frame_indices2 = np.arange(num_frames2)
 
-            # Calculate MAE for both strategies
-            def compute_mae(target, recon):
-                valid_mask = ~(np.isnan(target) | np.isnan(recon))
-                if np.any(valid_mask):
-                    return np.mean(np.abs(target[valid_mask] - recon[valid_mask]))
+                # Get data for both strategies to calculate shared y-limits and MAE
+                target_lengths1 = np.array(data1["target_line_lengths"][measurement_type])
+                recon_lengths1 = np.array(data1["recon_line_lengths"][measurement_type])
+                target_lengths2 = np.array(data2["target_line_lengths"][measurement_type])
+                recon_lengths2 = np.array(data2["recon_line_lengths"][measurement_type])
+
+                # Calculate MAE for both strategies
+                def compute_mae(target, recon):
+                    valid_mask = ~(np.isnan(target) | np.isnan(recon))
+                    if np.any(valid_mask):
+                        return np.mean(np.abs(target[valid_mask] - recon[valid_mask]))
+                    else:
+                        return np.nan
+
+                mae1 = compute_mae(target_lengths1, recon_lengths1)
+                mae2 = compute_mae(target_lengths2, recon_lengths2)
+
+                # Calculate shared y-limits for this measurement type across both strategies
+                all_lengths_for_ylim = []
+                all_lengths_for_ylim.extend([l for l in target_lengths1 if not np.isnan(l)])
+                all_lengths_for_ylim.extend([l for l in recon_lengths1 if not np.isnan(l)])
+                all_lengths_for_ylim.extend([l for l in target_lengths2 if not np.isnan(l)])
+                all_lengths_for_ylim.extend([l for l in recon_lengths2 if not np.isnan(l)])
+
+                # Include uncertainty bounds in y-limit calculation
+                if "line_stds" in data1 and data1["line_stds"] is not None:
+                    std_values1 = np.array(data1["line_stds"][measurement_type])
+                    valid_std1 = ~np.isnan(std_values1) & ~np.isnan(recon_lengths1)
+                    if np.any(valid_std1):
+                        all_lengths_for_ylim.extend(
+                            recon_lengths1[valid_std1] - std_values1[valid_std1]
+                        )
+                        all_lengths_for_ylim.extend(
+                            recon_lengths1[valid_std1] + std_values1[valid_std1]
+                        )
+
+                if "line_stds" in data2 and data2["line_stds"] is not None:
+                    std_values2 = np.array(data2["line_stds"][measurement_type])
+                    valid_std2 = ~np.isnan(std_values2) & ~np.isnan(recon_lengths2)
+                    if np.any(valid_std2):
+                        all_lengths_for_ylim.extend(
+                            recon_lengths2[valid_std2] - std_values2[valid_std2]
+                        )
+                        all_lengths_for_ylim.extend(
+                            recon_lengths2[valid_std2] + std_values2[valid_std2]
+                        )
+
+                # Calculate shared y-limits
+                if all_lengths_for_ylim:
+                    y_min, y_max = min(all_lengths_for_ylim), max(all_lengths_for_ylim)
+                    y_range = y_max - y_min
+                    # Add extra room at the top for MAE text
+                    shared_ylim = (y_min - 0.1 * y_range, y_max + 0.2 * y_range)
                 else:
-                    return np.nan
+                    shared_ylim = (0, 1)
 
-            mae1 = compute_mae(target_lengths1, recon_lengths1)
-            mae2 = compute_mae(target_lengths2, recon_lengths2)
+                # Plot for strategy 1 (left column) - greedy_entropy
+                ax1 = axes[row_idx, 0]
 
-            # Calculate shared y-limits for this measurement type across both sequences
-            all_lengths_for_ylim = []
-            all_lengths_for_ylim.extend([l for l in target_lengths1 if not np.isnan(l)])
-            all_lengths_for_ylim.extend([l for l in recon_lengths1 if not np.isnan(l)])
-            all_lengths_for_ylim.extend([l for l in target_lengths2 if not np.isnan(l)])
-            all_lengths_for_ylim.extend([l for l in recon_lengths2 if not np.isnan(l)])
+                # Target and reconstruction for strategy 1
+                valid_target1 = ~np.isnan(target_lengths1)
+                valid_recon1 = ~np.isnan(recon_lengths1)
 
-            # Include uncertainty bounds in y-limit calculation
-            if "line_stds" in data1 and data1["line_stds"] is not None:
-                std_values1 = np.array(data1["line_stds"][measurement_type])
-                valid_std1 = ~np.isnan(std_values1) & ~np.isnan(recon_lengths1)
-                if np.any(valid_std1):
-                    all_lengths_for_ylim.extend(
-                        recon_lengths1[valid_std1] - std_values1[valid_std1]
-                    )
-                    all_lengths_for_ylim.extend(
-                        recon_lengths1[valid_std1] + std_values1[valid_std1]
-                    )
+                line1 = ax1.plot(
+                    frame_indices1[valid_target1],
+                    target_lengths1[valid_target1],
+                    color=color,
+                    linestyle="-",
+                    linewidth=1.5,
+                    alpha=0.9,
+                    marker=None,
+                    markersize=0,
+                )[0]
 
-            if "line_stds" in data2 and data2["line_stds"] is not None:
-                std_values2 = np.array(data2["line_stds"][measurement_type])
-                valid_std2 = ~np.isnan(std_values2) & ~np.isnan(recon_lengths2)
-                if np.any(valid_std2):
-                    all_lengths_for_ylim.extend(
-                        recon_lengths2[valid_std2] - std_values2[valid_std2]
-                    )
-                    all_lengths_for_ylim.extend(
-                        recon_lengths2[valid_std2] + std_values2[valid_std2]
-                    )
+                line2 = ax1.plot(
+                    frame_indices1[valid_recon1],
+                    recon_lengths1[valid_recon1],
+                    color=color,
+                    linestyle="--",
+                    linewidth=1.5,
+                    alpha=0.9,
+                    marker=None,
+                    markersize=0,
+                )[0]
 
-            # Calculate shared y-limits
-            if all_lengths_for_ylim:
-                y_min, y_max = min(all_lengths_for_ylim), max(all_lengths_for_ylim)
-                y_range = y_max - y_min
-                # Add extra room at the top (20% instead of 10%) for MAE text
-                shared_ylim = (y_min - 0.1 * y_range, y_max + 0.2 * y_range)
-            else:
-                shared_ylim = (0, 1)
+                # Add uncertainty bands for strategy 1
+                fill_patch = None
+                if "line_stds" in data1 and data1["line_stds"] is not None:
+                    std_values1 = np.array(data1["line_stds"][measurement_type])
+                    valid_std1 = ~np.isnan(std_values1) & ~np.isnan(recon_lengths1)
 
-            # Plot for strategy 1 (left column) - greedy_entropy
-            ax1 = axes[row_idx, 0]
+                    if np.any(valid_std1):
+                        fill_patch = ax1.fill_between(
+                            frame_indices1[valid_std1],
+                            recon_lengths1[valid_std1] - std_values1[valid_std1],
+                            recon_lengths1[valid_std1] + std_values1[valid_std1],
+                            color=color,
+                            alpha=0.2,
+                        )
 
-            # Target and reconstruction for strategy 1
-            valid_target1 = ~np.isnan(target_lengths1)
-            valid_recon1 = ~np.isnan(recon_lengths1)
+                # Store legend handles and labels (only need to do this once per measurement type)
+                if seq_idx == 0 and legend_handles is None:
+                    legend_handles = [line1, line2]
+                    legend_labels = ["Target", "Reconstruction"]
+                    if fill_patch is not None:
+                        legend_handles.append(fill_patch)
+                        legend_labels.append("±1σ")
 
-            line1 = ax1.plot(
-                frame_indices1[valid_target1],
-                target_lengths1[valid_target1],
-                color=color,
-                linestyle="-",
-                linewidth=1.5,
-                alpha=0.9,
-                marker=None,
-                markersize=0,
-            )[0]
-
-            line2 = ax1.plot(
-                frame_indices1[valid_recon1],
-                recon_lengths1[valid_recon1],
-                color=color,
-                linestyle="--",
-                linewidth=1.5,
-                alpha=0.9,
-                marker=None,
-                markersize=0,
-            )[0]
-
-            # Add uncertainty bands for strategy 1
-            fill_patch = None
-            if "line_stds" in data1 and data1["line_stds"] is not None:
-                std_values1 = np.array(data1["line_stds"][measurement_type])
-                valid_std1 = ~np.isnan(std_values1) & ~np.isnan(recon_lengths1)
-
-                if np.any(valid_std1):
-                    fill_patch = ax1.fill_between(
-                        frame_indices1[valid_std1],
-                        recon_lengths1[valid_std1] - std_values1[valid_std1],
-                        recon_lengths1[valid_std1] + std_values1[valid_std1],
-                        color=color,
-                        alpha=0.2,
+                # Add MAE text for strategy 1
+                if not np.isnan(mae1):
+                    ax1.text(
+                        0.04,
+                        0.95,
+                        f"MAE: {mae1:.3f}",
+                        transform=ax1.transAxes,
+                        fontsize=7,
+                        verticalalignment="top",
                     )
 
-            # Store legend handles and labels (only need to do this once)
-            if row_idx == 0 and legend_handles is None:
-                legend_handles = [line1, line2]
-                legend_labels = ["Target", "Reconstruction"]
-                if fill_patch is not None:
-                    legend_handles.append(fill_patch)
-                    legend_labels.append("±1σ")
+                # Plot for strategy 2 (right column) - downstream_task_selection
+                ax2 = axes[row_idx, 1]
 
-            # Add MAE text for strategy 1
-            if not np.isnan(mae1):
-                ax1.text(
-                    0.04,
-                    0.95,
-                    f"MAE: {mae1:.3f}",
-                    transform=ax1.transAxes,
-                    fontsize=8,
-                    verticalalignment="top",
+                # Target and reconstruction for strategy 2
+                valid_target2 = ~np.isnan(target_lengths2)
+                valid_recon2 = ~np.isnan(recon_lengths2)
+
+                ax2.plot(
+                    frame_indices2[valid_target2],
+                    target_lengths2[valid_target2],
+                    color=color,
+                    linestyle="-",
+                    linewidth=1.5,
+                    alpha=0.9,
+                    marker=None,
+                    markersize=0,
+                )
+                ax2.plot(
+                    frame_indices2[valid_recon2],
+                    recon_lengths2[valid_recon2],
+                    color=color,
+                    linestyle="--",
+                    linewidth=1.5,
+                    alpha=0.9,
+                    marker=None,
+                    markersize=0,
                 )
 
-            # Plot for strategy 2 (right column) - downstream_task_selection
-            ax2 = axes[row_idx, 1]
+                # Add uncertainty bands for strategy 2
+                if "line_stds" in data2 and data2["line_stds"] is not None:
+                    std_values2 = np.array(data2["line_stds"][measurement_type])
+                    valid_std2 = ~np.isnan(std_values2) & ~np.isnan(recon_lengths2)
 
-            # Target and reconstruction for strategy 2
-            valid_target2 = ~np.isnan(target_lengths2)
-            valid_recon2 = ~np.isnan(recon_lengths2)
+                    if np.any(valid_std2):
+                        ax2.fill_between(
+                            frame_indices2[valid_std2],
+                            recon_lengths2[valid_std2] - std_values2[valid_std2],
+                            recon_lengths2[valid_std2] + std_values2[valid_std2],
+                            color=color,
+                            alpha=0.2,
+                        )
 
-            ax2.plot(
-                frame_indices2[valid_target2],
-                target_lengths2[valid_target2],
-                color=color,
-                linestyle="-",
-                linewidth=1.5,
-                alpha=0.9,
-                marker=None,
-                markersize=0,
-            )
-            ax2.plot(
-                frame_indices2[valid_recon2],
-                recon_lengths2[valid_recon2],
-                color=color,
-                linestyle="--",
-                linewidth=1.5,
-                alpha=0.9,
-                marker=None,
-                markersize=0,
-            )
-
-            # Add uncertainty bands for strategy 2
-            if "line_stds" in data2 and data2["line_stds"] is not None:
-                std_values2 = np.array(data2["line_stds"][measurement_type])
-                valid_std2 = ~np.isnan(std_values2) & ~np.isnan(recon_lengths2)
-
-                if np.any(valid_std2):
-                    ax2.fill_between(
-                        frame_indices2[valid_std2],
-                        recon_lengths2[valid_std2] - std_values2[valid_std2],
-                        recon_lengths2[valid_std2] + std_values2[valid_std2],
-                        color=color,
-                        alpha=0.2,
+                # Add MAE text for strategy 2
+                if not np.isnan(mae2):
+                    ax2.text(
+                        0.04,
+                        0.95,
+                        f"MAE: {mae2:.3f}",
+                        transform=ax2.transAxes,
+                        fontsize=7,
+                        verticalalignment="top",
                     )
 
-            # Add MAE text for strategy 2
-            if not np.isnan(mae2):
-                ax2.text(
-                    0.04,
-                    0.95,
-                    f"MAE: {mae2:.2f}",
-                    transform=ax2.transAxes,
-                    fontsize=8,
-                    verticalalignment="top",
-                )
+                # Configure both axes with their respective x-limits and shared y-limits
+                ax1.set_xlim(0, num_frames1 - 1)
+                ax2.set_xlim(0, num_frames2 - 1)
 
-            # Configure both axes with their respective x-limits and shared y-limits
-            # Set x-limits based on the respective sequence length
-            ax1.set_xlim(0, num_frames1 - 1)
-            ax2.set_xlim(0, num_frames2 - 1)
+                # Both axes share the same y-limits for comparison
+                ax1.set_ylim(shared_ylim)
+                ax2.set_ylim(shared_ylim)
 
-            # Both axes share the same y-limits for comparison
-            ax1.set_ylim(shared_ylim)
-            ax2.set_ylim(shared_ylim)
+                # Grid and formatting
+                ax1.grid(True, alpha=0.3)
+                ax2.grid(True, alpha=0.3)
 
-            # Grid and formatting
-            ax1.grid(True, alpha=0.3)
-            ax2.grid(True, alpha=0.3)
+                # Y-axis label: Measurement type on left column
+                ax1.set_ylabel(f"{measurement_type} [cm]", fontsize=8)
 
-            # Y-axis label: Measurement type only on left column for middle row
-            if row_idx == n_sequences // 2:  # Middle row
-                ax1.set_ylabel(f"{measurement_type} [cm]", fontsize=9)
-            else:
-                ax1.set_ylabel("")  # Empty label for other rows
+                # X-axis label only on the last row of each sequence block
+                is_last_measurement_in_sequence = (meas_idx == n_measurements - 1)
+                if is_last_measurement_in_sequence:
+                    ax1.set_xlabel("Frame", fontsize=8)
+                    ax2.set_xlabel("Frame", fontsize=8)
+                else:
+                    ax1.set_xlabel("")
+                    ax2.set_xlabel("")
+                    # Hide x-tick labels for non-bottom rows within a sequence
+                    ax1.tick_params(labelbottom=False)
+                    ax2.tick_params(labelbottom=False)
 
-            # X-axis label on all axes since they have independent scales
-            ax1.set_xlabel("Frame", fontsize=9)
-            ax2.set_xlabel("Frame", fontsize=9)
+                # Format y-axis to show max 1 decimal place
+                ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
+                ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
 
-            # Format y-axis to show max 1 decimal place
-            ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
-            ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.1f}"))
+        # Add column titles (strategy names)
+        axes[0, 0].set_title(strategy1_name, fontsize=9, pad=10)
+        axes[0, 1].set_title(strategy2_name, fontsize=9, pad=10)
 
-        # Add column titles
-        axes[0, 0].set_title(strategy1_name, fontsize=9, pad=8)
-        axes[0, 1].set_title(strategy2_name, fontsize=9, pad=8)
-
-        # Adjust layout to make room for horizontal legend at top and patient labels
+        # Adjust layout
         plt.tight_layout()
-        plt.subplots_adjust(top=0.80, wspace=0.2, hspace=0.4, left=0.12, right=0.93)
+        plt.subplots_adjust(top=0.92, wspace=0.25, hspace=0.15, left=0.15, right=0.95)
+
+        # Add sequence labels as text annotations on the left side
+        for seq_idx in range(n_sequences):
+            # Get the first row of this sequence block
+            first_row_idx = seq_idx * n_measurements
+            last_row_idx = first_row_idx + n_measurements - 1
+            
+            # Get positions of first and last axes in this sequence block
+            ax_first = axes[first_row_idx, 0]
+            ax_last = axes[last_row_idx, 0]
+            
+            pos_first = ax_first.get_position()
+            pos_last = ax_last.get_position()
+            
+            # Calculate center y position for this sequence block
+            center_y = (pos_first.y1 + pos_last.y0) / 2
+            
+            # Add sequence label on the left side
+            fig.text(
+                0.02,
+                center_y,
+                f"Seq. {seq_idx + 1}",
+                fontsize=9,
+                fontweight="bold",
+                rotation=90,
+                verticalalignment="center",
+                horizontalalignment="center",
+            )
 
         # Add horizontal legend at the top
         if legend_handles is not None:
@@ -1286,9 +1327,9 @@ def create_combined_time_series_plot_multiple_sequences(
                 legend_handles,
                 legend_labels,
                 loc="upper center",
-                bbox_to_anchor=(0.5, 0.96),
+                bbox_to_anchor=(0.55, 0.98),
                 ncol=len(legend_labels),  # Arrange horizontally
-                fontsize=9,
+                fontsize=8,
                 framealpha=0.9,
             )
 
@@ -1296,7 +1337,7 @@ def create_combined_time_series_plot_multiple_sequences(
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(
-            f"Saved combined time series comparison (multiple sequences) to {save_path}"
+            f"Saved combined time series comparison (multiple sequences, all measurements) to {save_path}"
         )
 
 
@@ -1316,14 +1357,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--measurement-to-plot",
         type=str,
-        default="LVID",
+        default="all",
         choices=["LVPW", "LVID", "IVS", "all"],
         help="Which measurement type to plot (default: LVID, 'all' plots all three)",
     )
     parser.add_argument(
         "--n-sequences",
         type=int,
-        default=2,
+        default=3,
         help="Number of different sequences to plot for comparison (default: 2)",
     )
     parser.add_argument(
@@ -1385,71 +1426,95 @@ if __name__ == "__main__":
     # Initialize downstream task
     downstream_task = EchoNetLVHMeasurement()
 
-    # Process each strategy - selecting multiple runs for time series comparison
-    strategy_data_dict = {}
-    strategy_run_paths = {}  # Store run paths for GIF creation
+    # Cache file for strategy_data_dict
+    CACHE_FILE = Path(f"/tmp/qualitative_dst_cache_x{args.x_value}_{args.target_measurement_type}_n{args.n_sequences}.pkl")
 
-    for strategy in strategies_to_compare:
-        print(f"\nProcessing strategy: {strategy}")
+    # Check if cached results exist
+    if CACHE_FILE.exists():
+        print(f"Loading cached strategy data from {str(CACHE_FILE)}")
+        with open(CACHE_FILE, "rb") as f:
+            cache_data = pickle.load(f)
+            strategy_data_dict = cache_data["strategy_data_dict"]
+            strategy_run_paths = cache_data["strategy_run_paths"]
+    else:
+        print("No cached data found. Processing runs...")
+        
+        # Process each strategy - selecting multiple runs for time series comparison
+        strategy_data_dict = {}
+        strategy_run_paths = {}  # Store run paths for GIF creation
 
-        # Select multiple representative runs
-        run_paths = select_representative_runs_fast(
-            suitable_runs_df,
-            strategy,
-            target_measurement_type=args.target_measurement_type,
-            seed=3,
-            n_runs=args.n_sequences,
-        )
+        for strategy in strategies_to_compare:
+            print(f"\nProcessing strategy: {strategy}")
 
-        if not run_paths:
-            print(f"No suitable runs found for strategy {strategy}")
-            continue
+            # Select multiple representative runs
+            run_paths = select_representative_runs_fast(
+                suitable_runs_df,
+                strategy,
+                target_measurement_type=args.target_measurement_type,
+                seed=3,
+                n_runs=args.n_sequences,
+            )
 
-        # Store run paths for potential GIF creation
-        strategy_run_paths[strategy] = run_paths
-
-        # Process each run
-        strategy_viz_data_list = []
-        for i, run_path in enumerate(run_paths):
-            print(f"Processing run {i + 1}/{len(run_paths)} for {strategy}...")
-            viz_data = process_run_for_visualization(run_path, io_config)
-
-            if viz_data is None:
-                print(f"Failed to process run data for {run_path}")
+            if not run_paths:
+                print(f"No suitable runs found for strategy {strategy}")
                 continue
 
-            strategy_viz_data_list.append(viz_data)
+            # Store run paths for potential GIF creation
+            strategy_run_paths[strategy] = run_paths
 
-        if not strategy_viz_data_list:
-            print(f"No valid visualization data for strategy {strategy}")
-            continue
+            # Process each run
+            strategy_viz_data_list = []
+            for i, run_path in enumerate(run_paths):
+                print(f"Processing run {i + 1}/{len(run_paths)} for {strategy}...")
+                viz_data = process_run_for_visualization(run_path, io_config)
 
-        strategy_data_dict[strategy] = strategy_viz_data_list
+                if viz_data is None:
+                    print(f"Failed to process run data for {run_path}")
+                    continue
 
+                strategy_viz_data_list.append(viz_data)
+
+            if not strategy_viz_data_list:
+                print(f"No valid visualization data for strategy {strategy}")
+                continue
+
+            strategy_data_dict[strategy] = strategy_viz_data_list
+
+        # Save to cache
+        print(f"Saving strategy data to cache: {str(CACHE_FILE)}")
+        with open(CACHE_FILE, "wb") as f:
+            pickle.dump({
+                "strategy_data_dict": strategy_data_dict,
+                "strategy_run_paths": strategy_run_paths,
+            }, f)
+
+    # Create individual time series plots for each sequence (moved outside the else block)
+    for strategy, strategy_viz_data_list in strategy_data_dict.items():
         # Get strategy display name
         strategy_display_name = STRATEGY_NAMES.get(strategy, strategy)
 
         # Create individual time series plots for each sequence
-        for i, viz_data in enumerate(strategy_viz_data_list):
-            time_series_path = (
-                save_root
-                / f"time_series_{strategy}_seq{i + 1}_x{args.x_value}_{args.measurement_to_plot}.pdf"
-            )
-            create_time_series_plot(
-                viz_data["target_line_lengths"],
-                viz_data["recon_line_lengths"],
-                time_series_path,
-                f"{strategy_display_name} (Seq. {i + 1})",
-                line_stds=viz_data["line_stds"],
-                context="styles/ieee-tmi.mplstyle",
-                measurement_types_to_plot=measurement_types_to_plot,
-            )
+        # for i, viz_data in enumerate(strategy_viz_data_list):
+        #     time_series_path = (
+        #         save_root
+        #         / f"time_series_{strategy}_seq{i + 1}_x{args.x_value}_{args.measurement_to_plot}.pdf"
+        #     )
+        #     create_time_series_plot(
+        #         viz_data["target_line_lengths"],
+        #         viz_data["recon_line_lengths"],
+        #         time_series_path,
+        #         f"{strategy_display_name} (Seq. {i + 1})",
+        #         line_stds=viz_data["line_stds"],
+        #         context="styles/ieee-tmi.mplstyle",
+        #         measurement_types_to_plot=measurement_types_to_plot,
+        #     )
+
 
     # Create combined time series plot for strategy comparison across multiple sequences
     if len(strategy_data_dict) == 2:
         combined_time_series_path = (
             save_root
-            / f"combined_time_series_multisequence_x{args.x_value}_{args.measurement_to_plot}.pdf"
+            / f"combined_time_series_multisequence_x{args.x_value}_{args.measurement_to_plot}.png"
         )
         create_combined_time_series_plot_multiple_sequences(
             strategy_data_dict,
