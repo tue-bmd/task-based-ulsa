@@ -11,10 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from keras import ops
 from matplotlib.animation import FuncAnimation
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, PowerNorm
 
 import zea
 from zea import log
+from zea.backend.autograd import AutoGrad
 from zea.display import scan_convert_2d
 from zea.visualize import plot_image_grid
 
@@ -569,6 +570,8 @@ def plot_downstream_task_beliefs(
     dpi=150,
     interpolation_matplotlib="nearest",
     context="styles/darkmode.mplstyle",
+    scan_convert_order=0,
+    scan_convert_resolution=0.1,
 ):
     """
     Plots a row with:
@@ -579,10 +582,10 @@ def plot_downstream_task_beliefs(
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     target_with_mask = downstream_task.postprocess_for_visualization(
-        target[None, ...], target_dst[None, ...]
+        target[None, ...], target_dst[None, ...], fill_value=np.nan
     )
     beliefs_with_mask = downstream_task.postprocess_for_visualization(
-        belief_distribution, beliefs_dst
+        belief_distribution, beliefs_dst, fill_value=np.nan
     )
 
     # Prepare mask agreement: sum of beliefs_dst masks
@@ -602,7 +605,7 @@ def plot_downstream_task_beliefs(
         ax0 = fig.add_subplot(gs[0, 0])
         ax0.imshow(
             np.squeeze(target_with_mask),
-            cmap="gray",
+            # cmap="gray",
             interpolation=interpolation_matplotlib,
         )
         ax0.set_title("Target", fontsize=12)
@@ -618,7 +621,7 @@ def plot_downstream_task_beliefs(
             ax = fig.add_subplot(grid_gs[row, col])
             ax.imshow(
                 np.squeeze(belief_img),
-                cmap="gray",
+                # cmap="gray",
                 interpolation=interpolation_matplotlib,
             )
             ax.axis("off")
@@ -646,15 +649,502 @@ def plot_downstream_task_beliefs(
         plt.close(fig)
         log.info(log.yellow(f"Saved downstream task beliefs plot to {save_path}"))
 
+    autograd = AutoGrad()
+    autograd.set_function(downstream_task.call_differentiable)
+    echonet_grad_and_value_fn = autograd.get_gradient_and_value_jit_fn()
+    jacobians, _ = ops.vectorized_map(
+        echonet_grad_and_value_fn,
+        belief_distribution[:, None, ..., None],  # add batch dim for segmenter
+    )
+    jacobians_squared = jacobians[:, 0, ..., 0] ** 2
+
+    saliency_map = ops.var(belief_distribution, axis=0) * ops.mean(
+        jacobians_squared, axis=0
+    )
+
+    # Scan convert jacobians
+    jacobians_squared_sc = _scan_convert(
+        jacobians_squared,
+        io_config.scan_conversion_angles,
+        order=scan_convert_order,
+        fill_value=np.nan,
+        resolution=scan_convert_resolution,
+    )
+
+    saliency_map_sc = _scan_convert(
+        saliency_map,
+        io_config.scan_conversion_angles,
+        order=scan_convert_order,
+        fill_value=np.nan,
+        resolution=scan_convert_resolution,
+    )
+
+    # Compute mean squared jacobian
+    mean_jacobian_squared = np.mean(jacobians_squared_sc, axis=0)
+
+    vmin, vmax = np.nanpercentile(jacobians_squared_sc, [0, 99.9])
+    jacobians_squared_sc = np.clip(jacobians_squared_sc, vmin, vmax)
+
+    vmin, vmax = np.nanpercentile(mean_jacobian_squared, [0, 99.9])
+    mean_jacobian_squared = np.clip(mean_jacobian_squared, vmin, vmax)
+
+    vmin, vmax = np.nanpercentile(saliency_map_sc, [0, 99.9])
+    saliency_map_sc = np.clip(saliency_map_sc, vmin, vmax)
+
+    # Plot grid of individual squared jacobians
+    with plt.style.context(context):
+        fig_jac = plt.figure(figsize=(8, 8), dpi=dpi)
+        fig_jac.patch.set_alpha(0.0)  # Transparent background
+
+        # Create 2x2 grid for the 4 beliefs
+        for i in range(4):
+            ax = fig_jac.add_subplot(2, 2, i + 1)
+            ax.patch.set_alpha(0.0)  # Transparent axis background
+
+            if i < len(jacobians_squared_sc):
+                im = ax.imshow(
+                    jacobians_squared_sc[i],
+                    cmap="viridis",
+                    interpolation=interpolation_matplotlib,
+                    norm=PowerNorm(gamma=0.4),
+                )
+                ax.set_title(f"x^({i + 1})", fontsize=14)
+            else:
+                # Empty subplot if fewer than 4 beliefs
+                ax.axis("off")
+                continue
+
+            ax.axis("off")
+
+        plt.suptitle("Squared Jacobians (LVID)", fontsize=16)
+        plt.tight_layout()
+
+        jacobians_save_path = save_dir / f"jacobians_squared_grid_{frame_idx}.png"
+        plt.savefig(jacobians_save_path, bbox_inches="tight", dpi=dpi, transparent=True)
+        plt.close(fig_jac)
+        log.info(log.yellow(f"Saved squared jacobians grid to {jacobians_save_path}"))
+
+    # Plot mean squared jacobian
+    with plt.style.context(context):
+        fig_mean = plt.figure(figsize=(6, 6), dpi=dpi)
+        fig_mean.patch.set_alpha(0.0)  # Transparent background
+
+        ax = fig_mean.add_subplot(1, 1, 1)
+        ax.patch.set_alpha(0.0)  # Transparent axis background
+
+        im = ax.imshow(
+            mean_jacobian_squared,
+            cmap="viridis",
+            interpolation=interpolation_matplotlib,
+            norm=PowerNorm(gamma=0.4),
+        )
+        ax.set_title("Mean Squared Jacobian (LVID)", fontsize=16)
+        ax.axis("off")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, shrink=0.6)
+
+        plt.tight_layout()
+
+        mean_jacobian_save_path = save_dir / f"mean_jacobian_squared_{frame_idx}.png"
+        plt.savefig(
+            mean_jacobian_save_path, bbox_inches="tight", dpi=dpi, transparent=True
+        )
+        plt.close(fig_mean)
+        log.info(
+            log.yellow(f"Saved mean squared jacobian to {mean_jacobian_save_path}")
+        )
+
+    with plt.style.context(context):
+        fig_mean = plt.figure(figsize=(6, 6), dpi=dpi)
+        fig_mean.patch.set_alpha(0.0)  # Transparent background
+
+        ax = fig_mean.add_subplot(1, 1, 1)
+        ax.patch.set_alpha(0.0)  # Transparent axis background
+
+        im = ax.imshow(
+            saliency_map_sc,
+            cmap="viridis",
+            interpolation=interpolation_matplotlib,
+            norm=PowerNorm(gamma=0.5),
+        )
+        ax.set_title("Saliency (LVID)", fontsize=16)
+        ax.axis("off")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, shrink=0.6)
+
+        plt.tight_layout()
+
+        saliency_save_path = save_dir / f"saliency_{frame_idx}.png"
+        plt.savefig(saliency_save_path, bbox_inches="tight", dpi=dpi, transparent=True)
+        plt.close(fig_mean)
+        log.info(log.yellow(f"Saved saliency map to {saliency_save_path}"))
+
+    demo_greedy_entropy_variance_reduction_gif(
+        save_dir / f"greedy_saliency_reduction_{frame_idx}.gif",
+        ops.convert_to_numpy(saliency_map),
+        io_config,
+        cmap="viridis",
+        gif_fps=3,
+        # context=context,
+    )
+
+
+def plot_single_measurement_type_gifs(
+    save_dir,
+    targets,  # shape (num_frames, H, W)
+    measurements,  # shape (num_frames, H, W)
+    reconstructions,  # shape (num_frames, H, W)
+    masks,
+    posterior_std,  # shape (num_frames, H, W)
+    downstream_task,
+    reconstructions_dst,
+    beliefs_dst,  # shape (30, 4, 224, 224, 4)
+    targets_dst,
+    saliency_maps,  # shape (num_frames, H, W) or (num_frames, H, W, 1)
+    io_config,
+    measurement_type,  # Single measurement type: "LVPW", "LVID", or "IVS"
+    dpi=150,
+    scan_convert_order=0,
+    scan_convert_resolution=0.1,
+    interpolation_matplotlib="nearest",
+    image_range=(-1, 1),
+    context="styles/darkmode.mplstyle",
+    drop_first_n_frames=0,
+    window_size=7,
+    no_measurement_color="gray",
+    show_reconstructions_in_timeseries=True,
+    target_file_hash=None,
+):
+    """
+    Generate 3 separate GIFs for a single measurement type:
+    1. Target images with time series
+    2. Measurements with time series
+    3. Density heatmap with time series
+
+    Args:
+        measurement_type (str): One of "LVPW", "LVID", "IVS"
+        All other args same as plot_downstream_task_output_for_presentation
+    """
+    if measurement_type not in ["LVPW", "LVID", "IVS"]:
+        raise ValueError(
+            f"measurement_type must be one of ['LVPW', 'LVID', 'IVS'], got {measurement_type}"
+        )
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    num_frames = targets.shape[0]
+
+    # Process images same as original function
+    targets_with_mask = downstream_task.postprocess_for_visualization(
+        targets, targets_dst
+    )
+    reconstructions_with_mask = downstream_task.postprocess_for_visualization(
+        reconstructions, reconstructions_dst
+    )
+
+    measurements = zea.utils.translate(
+        ops.clip(measurements, -1, 1), range_to=image_range
+    )
+    measurements = keras.ops.where(
+        masks > 0, measurements, color_to_value(image_range, no_measurement_color)
+    )
+    measurements = postprocess_agent_results(
+        measurements,
+        io_config,
+        scan_convert_order=0,
+        drop_first_n_frames=drop_first_n_frames,
+        image_range=image_range,
+        scan_convert_resolution=scan_convert_resolution,
+    )
+
+    # rescale DST outputs to get correct aspect ratio (same as plot_downstream_task_output_for_presentation)
+    aspect_ratio = ops.shape(measurements)[2] / ops.shape(measurements)[1]
+    new_shape = (
+        ops.shape(targets_with_mask)[1],
+        int(ops.shape(targets_with_mask)[1] * aspect_ratio),
+    )
+    targets_with_mask = ops.image.resize(
+        targets_with_mask, new_shape, interpolation="nearest"
+    )
+    reconstructions_with_mask = ops.image.resize(
+        reconstructions_with_mask, new_shape, interpolation="nearest"
+    )
+
+    # Create density heatmap
+    heatmap = get_heatmap(
+        masks, io_config, cmap="inferno", window_size=window_size, sigma=None
+    )
+    offset = max(window_size, drop_first_n_frames)
+    if offset > len(heatmap):
+        offset = 0
+        log.warning(
+            f"Heatmap sequence is not long enough to cut off {offset} frames. Setting to 0."
+        )
+    heatmap = heatmap[offset:]
+
+    # Compute measurement line lengths for the specified measurement type only
+    measurement_color = {"LVPW": "yellow", "LVID": "magenta", "IVS": "cyan"}[
+        measurement_type
+    ]
+
+    def compute_line_length(bottom_coords, top_coords):
+        """Compute Euclidean distance between bottom and top coordinates"""
+        if bottom_coords is None or top_coords is None:
+            return np.nan
+        if target_file_hash is None:
+            return np.sqrt(np.sum((bottom_coords - top_coords) ** 2))
+        else:
+            return downstream_task.get_distance_in_cm(
+                target_file_hash, bottom_coords, top_coords
+            )
+
+    # Compute line lengths for all frames
+    target_line_lengths = []
+    belief_line_lengths_mean = []
+    belief_line_lengths_std = []
+
+    for frame_idx in range(num_frames):
+        # Target measurements
+        try:
+            target_bottom, target_top = downstream_task.outputs_to_coordinates(
+                targets_dst[frame_idx : frame_idx + 1], measurement_type
+            )
+            target_length = compute_line_length(target_bottom, target_top)
+            target_line_lengths.append(target_length)
+        except:
+            target_line_lengths.append(np.nan)
+
+        # Belief measurements (compute for all 4 beliefs) - only if showing reconstructions
+        if show_reconstructions_in_timeseries:
+            try:
+                belief_lengths = []
+                for belief_idx in range(beliefs_dst.shape[1]):  # 4 beliefs
+                    belief_bottom, belief_top = downstream_task.outputs_to_coordinates(
+                        beliefs_dst[frame_idx, belief_idx : belief_idx + 1],
+                        measurement_type,
+                    )
+                    belief_length = compute_line_length(belief_bottom, belief_top)
+                    if not np.isnan(belief_length):
+                        belief_lengths.append(belief_length)
+
+                if belief_lengths:
+                    belief_mean = np.mean(belief_lengths)
+                    belief_std = (
+                        np.std(belief_lengths) if len(belief_lengths) > 1 else 0.0
+                    )
+                    belief_line_lengths_mean.append(belief_mean)
+                    belief_line_lengths_std.append(belief_std)
+                else:
+                    belief_line_lengths_mean.append(np.nan)
+                    belief_line_lengths_std.append(np.nan)
+            except:
+                belief_line_lengths_mean.append(np.nan)
+                belief_line_lengths_std.append(np.nan)
+
+    def create_timeseries_plot(ax_timeseries, frame_idx):
+        """Create single measurement type time series plot"""
+        frame_indices = np.arange(num_frames)
+
+        # Plot target line lengths
+        target_lengths = np.array(target_line_lengths)
+        valid_target = ~np.isnan(target_lengths)
+        ax_timeseries.plot(
+            frame_indices[valid_target],
+            target_lengths[valid_target],
+            color=measurement_color,
+            linestyle="-",
+            linewidth=2,
+            label="Target",
+            alpha=0.8,
+        )
+
+        # Only plot belief/reconstruction lines if enabled
+        if show_reconstructions_in_timeseries:
+            belief_means = np.array(belief_line_lengths_mean)
+            belief_stds = np.array(belief_line_lengths_std)
+            valid_beliefs = ~np.isnan(belief_means)
+
+            ax_timeseries.plot(
+                frame_indices[valid_beliefs],
+                belief_means[valid_beliefs],
+                color=measurement_color,
+                linestyle="--",
+                linewidth=2,
+                label="Beliefs",
+                alpha=0.8,
+            )
+
+            # Add error bars for standard deviation
+            ax_timeseries.fill_between(
+                frame_indices[valid_beliefs],
+                belief_means[valid_beliefs] - belief_stds[valid_beliefs],
+                belief_means[valid_beliefs] + belief_stds[valid_beliefs],
+                color=measurement_color,
+                alpha=0.2,
+            )
+
+        # Add vertical line for current frame
+        ax_timeseries.axvline(
+            x=frame_idx, color="white", linestyle=":", linewidth=2, alpha=0.8
+        )
+
+        # Set labels and formatting
+        unit = "[cm]" if target_file_hash is not None else "[pixels]"
+        ax_timeseries.set_ylabel(f"{measurement_type} {unit}", fontsize=12)
+        ax_timeseries.set_xlabel("Frame", fontsize=12)
+        if show_reconstructions_in_timeseries:
+            ax_timeseries.legend(loc="upper right", fontsize=10)
+        ax_timeseries.grid(True, alpha=0.3)
+        ax_timeseries.set_xlim(0, num_frames - 1)
+        ax_timeseries.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, p: f"{x:.2f}")
+        )
+
+        # Set y-limits based on measurement data
+        measurement_lengths = [l for l in target_line_lengths if not np.isnan(l)]
+
+        if show_reconstructions_in_timeseries:
+            means = np.array(belief_line_lengths_mean)
+            stds = np.array(belief_line_lengths_std)
+            valid = ~np.isnan(means) & ~np.isnan(stds)
+            measurement_lengths.extend((means[valid] + stds[valid]).tolist())
+            measurement_lengths.extend((means[valid] - stds[valid]).tolist())
+
+        if measurement_lengths:
+            y_min, y_max = min(measurement_lengths), max(measurement_lengths)
+            y_range = y_max - y_min
+            ax_timeseries.set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+
+    def create_frame_with_timeseries(
+        frame_idx, left_image, left_title, left_cmap="gray"
+    ):
+        """Create frame with left image and right timeseries"""
+        with plt.style.context(context):
+            # Create figure with appropriate size
+            fig = plt.figure(figsize=(12, 6), dpi=dpi)
+
+            # Use a simple approach: create axes with specific positions
+            # Left image: takes up left 30% of width, full height
+            ax_left = fig.add_axes(
+                [0.05, 0.1, 0.25, 0.8]
+            )  # [left, bottom, width, height]
+
+            # Right timeseries: takes up right 65% of width, but only middle 50% of height
+            ax_timeseries = fig.add_axes(
+                [0.35, 0.3, 0.6, 0.4]
+            )  # centered vertically, shorter
+
+            if left_cmap == "gray":
+                ax_left.imshow(
+                    left_image,
+                    cmap="gray",
+                    interpolation=interpolation_matplotlib,
+                    vmin=0,
+                    vmax=255,
+                )
+            else:
+                ax_left.imshow(left_image, interpolation=interpolation_matplotlib)
+            ax_left.set_title(left_title, fontsize=14)
+            ax_left.axis("off")
+
+            # Create the time series plot
+            create_timeseries_plot(ax_timeseries, frame_idx)
+
+            # Save frame to buffer
+            from io import BytesIO
+
+            buf = BytesIO()
+            plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+            buf.seek(0)
+            plt.close(fig)
+
+            # Convert to numpy array
+            import PIL.Image
+
+            img = PIL.Image.open(buf)
+            return np.array(img)
+
+    # Generate frames for each of the 3 GIFs
+    print(f"Creating {measurement_type} visualization GIFs...")
+
+    # 1. Target frames
+    print("Creating target frames...")
+    target_frames = []
+    for frame_idx in range(num_frames):
+        frame = create_frame_with_timeseries(
+            frame_idx,
+            targets_with_mask[frame_idx],
+            f"Target",
+            left_cmap="rgb",
+        )
+        target_frames.append(frame)
+        print(f"Target frame {frame_idx + 1}/{num_frames}", end="\r")
+    print()
+
+    # 2. Measurement frames
+    print("Creating measurement frames...")
+    measurement_frames = []
+    for frame_idx in range(num_frames):
+        frame = create_frame_with_timeseries(
+            frame_idx,
+            measurements[frame_idx],
+            f"Measurements",
+            left_cmap="gray",
+        )
+        measurement_frames.append(frame)
+        print(f"Measurement frame {frame_idx + 1}/{num_frames}", end="\r")
+    print()
+
+    # 3. Heatmap frames (adjust for offset)
+    print("Creating heatmap frames...")
+    heatmap_frames = []
+    heatmap_num_frames = len(heatmap)
+    for frame_idx in range(heatmap_num_frames):
+        # Adjust frame index for timeseries to account for offset
+        timeseries_frame_idx = frame_idx + offset
+        frame = create_frame_with_timeseries(
+            timeseries_frame_idx,
+            heatmap[frame_idx],
+            f"Density Heatmap",
+            left_cmap="rgb",
+        )
+        heatmap_frames.append(frame)
+        print(f"Heatmap frame {frame_idx + 1}/{heatmap_num_frames}", end="\r")
+    print()
+
+    # Save all 3 GIFs
+    import imageio
+
+    fps = io_config.gif_fps if hasattr(io_config, "gif_fps") else 10
+
+    # Save target gif
+    target_gif_path = save_dir / f"{measurement_type.lower()}_target_timeseries.gif"
+    imageio.mimsave(target_gif_path, target_frames, fps=fps, loop=0)
+    print(f"Saved target visualization to {target_gif_path}")
+
+    # Save measurement gif
+    measurement_gif_path = (
+        save_dir / f"{measurement_type.lower()}_measurements_timeseries.gif"
+    )
+    imageio.mimsave(measurement_gif_path, measurement_frames, fps=fps, loop=0)
+    print(f"Saved measurement visualization to {measurement_gif_path}")
+
+    # Save heatmap gif
+    heatmap_gif_path = save_dir / f"{measurement_type.lower()}_heatmap_timeseries.gif"
+    imageio.mimsave(heatmap_gif_path, heatmap_frames, fps=fps, loop=0)
+    print(f"Saved heatmap visualization to {heatmap_gif_path}")
+
+    print(f"All {measurement_type} visualization GIFs saved successfully!")
+
 
 def plot_downstream_task_output_for_presentation(
     save_dir,
     targets,  # shape (num_frames, H, W)
     measurements,  # shape (num_frames, H, W)
     reconstructions,  # shape (num_frames, H, W)
+    masks,
     posterior_std,  # shape (num_frames, H, W)
     downstream_task,
     reconstructions_dst,
+    beliefs_dst,  # shape (30, 4, 224, 224, 4)
     targets_dst,
     saliency_maps,  # shape (num_frames, H, W) or (num_frames, H, W, 1)
     io_config,
@@ -666,10 +1156,14 @@ def plot_downstream_task_output_for_presentation(
     context="styles/darkmode.mplstyle",
     gif_name="downstream_task_output.gif",
     drop_first_n_frames=0,
+    no_measurement_color="gray",
+    show_reconstructions_in_timeseries=True,  # New parameter
+    target_file_hash=None,
 ):
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     num_frames = targets.shape[0]
+
     # expects RGB image output
     targets_with_mask = downstream_task.postprocess_for_visualization(
         targets, targets_dst
@@ -678,15 +1172,19 @@ def plot_downstream_task_output_for_presentation(
         reconstructions, reconstructions_dst
     )
 
-    # TODO: maybe check if DST output is same size as measurements etc and if not then resize?
-
+    measurements = zea.utils.translate(
+        ops.clip(measurements, -1, 1), range_to=image_range
+    )
+    measurements = keras.ops.where(
+        masks > 0, measurements, color_to_value(image_range, no_measurement_color)
+    )
     measurements = postprocess_agent_results(
         measurements,
         io_config,
         scan_convert_order=0,  # always 0 for masks!
         drop_first_n_frames=drop_first_n_frames,
         image_range=image_range,
-        scan_convert_resolution=scan_convert_resolution,
+        scan_convert_resolution=scan_convert_resolution,  # make higher = faster?
     )
 
     # rescale DST outputs to get correct aspect ratio
@@ -703,8 +1201,18 @@ def plot_downstream_task_output_for_presentation(
     )
 
     # apply log for visualization
-    saliency_maps = postprocess_heatmap(saliency_maps, io_config, cmap="magma_r")
-    posterior_std = postprocess_heatmap(posterior_std, io_config, cmap="magma_r")
+    saliency_maps = postprocess_heatmap(
+        saliency_maps,
+        io_config,
+        cmap="magma_r",
+        scan_convert_resolution=scan_convert_resolution,
+    )
+    posterior_std = postprocess_heatmap(
+        posterior_std,
+        io_config,
+        cmap="magma_r",
+        scan_convert_resolution=scan_convert_resolution,
+    )
 
     arrays = [
         targets_with_mask,
@@ -721,15 +1229,286 @@ def plot_downstream_task_output_for_presentation(
         "DST Saliency",
     ]
 
-    # Make gif
-    side_by_side_gif(
-        save_dir / gif_name,
-        *arrays,
-        dpi=dpi,
-        interpolation=interpolation_matplotlib,
+    # Compute measurement line lengths for time series
+    measurement_types = ["LVPW", "LVID", "IVS"]
+    measurement_colors = {"LVPW": "yellow", "LVID": "magenta", "IVS": "cyan"}
+
+    def compute_line_length(bottom_coords, top_coords):
+        """Compute Euclidean distance between bottom and top coordinates"""
+        if bottom_coords is None or top_coords is None:
+            return np.nan
+        if target_file_hash is None:
+            return np.sqrt(np.sum((bottom_coords - top_coords) ** 2))
+        else:
+            return downstream_task.get_distance_in_cm(
+                target_file_hash, bottom_coords, top_coords
+            )
+
+    # Compute line lengths for all frames and measurement types
+    target_line_lengths = {mt: [] for mt in measurement_types}
+    belief_line_lengths_mean = {mt: [] for mt in measurement_types}
+    belief_line_lengths_std = {mt: [] for mt in measurement_types}
+
+    for frame_idx in range(num_frames):
+        for measurement_type in measurement_types:
+            # Target measurements
+            try:
+                target_bottom, target_top = downstream_task.outputs_to_coordinates(
+                    targets_dst[frame_idx : frame_idx + 1], measurement_type
+                )
+                target_length = compute_line_length(target_bottom, target_top)
+                if target_length > 345:
+                    print(
+                        f"❗️ error, target_length={target_length}, \n target_bottom={target_bottom}, \n target_top={target_top} \n measurement_type={measurement_type}",
+                    )
+                    np.save(
+                        f"target_{frame_idx}.npy",
+                        targets_dst[frame_idx : frame_idx + 1],
+                    )
+                target_line_lengths[measurement_type].append(target_length)
+            except:
+                target_line_lengths[measurement_type].append(np.nan)
+
+            # Belief measurements (compute for all 4 beliefs) - only if showing reconstructions
+            if show_reconstructions_in_timeseries:
+                try:
+                    belief_lengths = []
+                    # beliefs_dst shape: (30, 4, 224, 224, 4)
+                    # Extract all 4 beliefs for this frame
+                    for belief_idx in range(beliefs_dst.shape[1]):  # 4 beliefs
+                        belief_bottom, belief_top = (
+                            downstream_task.outputs_to_coordinates(
+                                beliefs_dst[frame_idx, belief_idx : belief_idx + 1],
+                                measurement_type,
+                            )
+                        )
+                        belief_length = compute_line_length(belief_bottom, belief_top)
+                        if not np.isnan(belief_length):
+                            belief_lengths.append(belief_length)
+
+                        if belief_length > 345:
+                            print(
+                                f"❗️ error, belief_length={belief_length}, \n belief_bottom={belief_bottom}, \n belief_top={belief_top} \n measurement_type={measurement_type}",
+                            )
+                            np.save(
+                                f"belief_{frame_idx}_{belief_idx}.npy",
+                                beliefs_dst[frame_idx, belief_idx : belief_idx + 1][
+                                    frame_idx : frame_idx + 1
+                                ],
+                            )
+
+                    if belief_lengths:
+                        belief_mean = np.mean(belief_lengths)
+                        belief_std = (
+                            np.std(belief_lengths) if len(belief_lengths) > 1 else 0.0
+                        )
+                        belief_line_lengths_mean[measurement_type].append(belief_mean)
+                        belief_line_lengths_std[measurement_type].append(belief_std)
+                    else:
+                        belief_line_lengths_mean[measurement_type].append(np.nan)
+                        belief_line_lengths_std[measurement_type].append(np.nan)
+                except:
+                    belief_line_lengths_mean[measurement_type].append(np.nan)
+                    belief_line_lengths_std[measurement_type].append(np.nan)
+
+    # Shared function to create time series plot
+    def create_timeseries_plot(ax_timeseries, frame_idx):
+        """Create the time series plot for a given frame with 3 stacked subplots"""
+        # Remove the single axis and create 3 stacked subplots
+        ax_timeseries.remove()
+
+        # Get the position of the original axis
+        gs_pos = ax_timeseries.get_gridspec()
+        subplot_spec = gs_pos[1, :]
+
+        # Create 3 stacked subplots within the time series area
+        inner_gs = gridspec.GridSpecFromSubplotSpec(
+            3, 1, subplot_spec=subplot_spec, hspace=0.3
+        )
+
+        frame_indices = np.arange(num_frames)
+
+        for idx, measurement_type in enumerate(measurement_types):
+            ax = plt.subplot(inner_gs[idx, 0])
+            color = measurement_colors[measurement_type]
+
+            # Plot target line lengths
+            target_lengths = np.array(target_line_lengths[measurement_type])
+            valid_target = ~np.isnan(target_lengths)
+            ax.plot(
+                frame_indices[valid_target],
+                target_lengths[valid_target],
+                color=color,
+                linestyle="-",
+                linewidth=2,
+                label="Target",
+                alpha=0.8,
+            )
+
+            # Only plot belief/reconstruction lines if enabled
+            if show_reconstructions_in_timeseries:
+                # Plot belief line lengths (mean with std as error bars)
+                belief_means = np.array(belief_line_lengths_mean[measurement_type])
+                belief_stds = np.array(belief_line_lengths_std[measurement_type])
+                valid_beliefs = ~np.isnan(belief_means)
+
+                ax.plot(
+                    frame_indices[valid_beliefs],
+                    belief_means[valid_beliefs],
+                    color=color,
+                    linestyle="--",
+                    linewidth=2,
+                    label="Beliefs",
+                    alpha=0.8,
+                )
+
+                # Add error bars for standard deviation
+                ax.fill_between(
+                    frame_indices[valid_beliefs],
+                    belief_means[valid_beliefs] - belief_stds[valid_beliefs],
+                    belief_means[valid_beliefs] + belief_stds[valid_beliefs],
+                    color=color,
+                    alpha=0.2,
+                )
+
+            # Add vertical line for current frame
+            ax.axvline(
+                x=frame_idx, color="white", linestyle=":", linewidth=2, alpha=0.8
+            )
+
+            # Set labels and formatting
+            unit = "[cm]" if target_file_hash is not None else "[pixels]"
+            ax.set_ylabel(f"{measurement_type} {unit}", fontsize=10)
+            if show_reconstructions_in_timeseries:
+                ax.legend(loc="upper right", fontsize=8)
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(0, num_frames - 1)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.2f}"))
+
+            # Only show x-axis label on bottom subplot
+            if idx == len(measurement_types) - 1:
+                ax.set_xlabel("Frame", fontsize=12)
+            else:
+                ax.set_xticklabels([])
+
+            # Set y-limits based on this measurement type's data
+            measurement_lengths = []
+            measurement_lengths.extend(
+                [l for l in target_line_lengths[measurement_type] if not np.isnan(l)]
+            )
+
+            # Include mean ± std for beliefs only if showing reconstructions
+            if show_reconstructions_in_timeseries:
+                means = np.array(belief_line_lengths_mean[measurement_type])
+                stds = np.array(belief_line_lengths_std[measurement_type])
+                valid = ~np.isnan(means) & ~np.isnan(stds)
+                measurement_lengths.extend((means[valid] + stds[valid]).tolist())
+                measurement_lengths.extend((means[valid] - stds[valid]).tolist())
+
+            if measurement_lengths:
+                y_min, y_max = min(measurement_lengths), max(measurement_lengths)
+                y_range = y_max - y_min
+                ax.set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+
+    # Shared function to create frame with different top-left image
+    def create_enhanced_frame(frame_idx, left_image, left_title, left_cmap="gray"):
+        """Create enhanced frame with customizable left image"""
+        with plt.style.context(context):
+            fig = plt.figure(figsize=(12, 8), dpi=dpi)
+            gs = gridspec.GridSpec(2, 2, height_ratios=[2, 2], width_ratios=[1, 1])
+
+            # Top left: Customizable image
+            ax_left = fig.add_subplot(gs[0, 0])
+            if left_cmap == "gray":
+                ax_left.imshow(
+                    left_image,
+                    cmap="gray",
+                    interpolation=interpolation_matplotlib,
+                    vmin=0,
+                    vmax=255,
+                )
+            else:
+                ax_left.imshow(left_image, interpolation=interpolation_matplotlib)
+            ax_left.set_title(left_title, fontsize=14)
+            ax_left.axis("off")
+
+            # Top right: Reconstruction (always the same)
+            ax_recon = fig.add_subplot(gs[0, 1])
+            ax_recon.imshow(
+                reconstructions_with_mask[frame_idx],
+                interpolation=interpolation_matplotlib,
+            )
+            ax_recon.set_title("Reconstruction", fontsize=14)
+            ax_recon.axis("off")
+
+            # Bottom: Time series spanning both columns
+            ax_timeseries = fig.add_subplot(gs[1, :])
+            create_timeseries_plot(ax_timeseries, frame_idx)
+
+            plt.tight_layout()
+
+            # Save frame to buffer
+            from io import BytesIO
+
+            buf = BytesIO()
+            plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+            buf.seek(0)
+            plt.close(fig)
+
+            # Convert to numpy array
+            import PIL.Image
+
+            img = PIL.Image.open(buf)
+            return np.array(img)
+
+    # Create frames for first enhanced gif (Target + Reconstruction)
+    print("Creating enhanced downstream task visualization...")
+    enhanced_frames = []
+    for frame_idx in range(num_frames):
+        frame = create_enhanced_frame(
+            frame_idx, targets_with_mask[frame_idx], "Target", left_cmap="rgb"
+        )
+        enhanced_frames.append(frame)
+        print(f"Created frame {frame_idx + 1}/{num_frames}", end="\r")
+
+    print()  # New line after progress
+
+    # Save first enhanced gif
+    enhanced_gif_name = gif_name.replace(".gif", "_with_timeseries.gif")
+    import imageio
+
+    imageio.mimsave(
+        save_dir / enhanced_gif_name,
+        enhanced_frames,
         fps=io_config.gif_fps if hasattr(io_config, "gif_fps") else 10,
-        context=context,
-        labels=labels,
+        loop=0,
+    )
+    print(f"Saved enhanced visualization to {save_dir / enhanced_gif_name}")
+
+    # Create frames for second enhanced gif (Measurements + Reconstruction)
+    print("Creating enhanced downstream task visualization with measurements...")
+    enhanced_frames_measurements = []
+    for frame_idx in range(num_frames):
+        frame = create_enhanced_frame(
+            frame_idx, measurements[frame_idx], "Measurements", left_cmap="gray"
+        )
+        enhanced_frames_measurements.append(frame)
+        print(f"Created measurements frame {frame_idx + 1}/{num_frames}", end="\r")
+
+    print()  # New line after progress
+
+    # Save second enhanced gif
+    enhanced_gif_name_measurements = gif_name.replace(
+        ".gif", "_measurements_with_timeseries.gif"
+    )
+    imageio.mimsave(
+        save_dir / enhanced_gif_name_measurements,
+        enhanced_frames_measurements,
+        fps=io_config.gif_fps if hasattr(io_config, "gif_fps") else 10,
+        loop=0,
+    )
+    print(
+        f"Saved enhanced measurements visualization to {save_dir / enhanced_gif_name_measurements}"
     )
 
 
@@ -1151,3 +1930,142 @@ def animate_overviews(save_dir, io_config):
         sort_key_fn=sort_frames,
         fps=io_config.gif_fps,
     )
+
+
+def demo_greedy_entropy_variance_reduction_gif(
+    save_path,
+    variance_image,
+    io_config,
+    cmap="magma",
+    scan_convert_order=0,
+    interpolation_matplotlib="nearest",
+    context="styles/darkmode.mplstyle",
+    n_steps=None,
+    std_dev=1.0,
+    num_lines_to_update=9,
+    gif_fps=10,
+):
+    """
+    Demonstrates the effect of GreedyEntropy's select_line_and_reweight_entropy on a variance map.
+    Args:
+        save_path (str or Path): Where to save the gif.
+        variance_image (np.ndarray): 2D variance image, shape (H, W).
+        io_config: IO config with scan_conversion_angles.
+        scan_convert_order: Order for scan conversion.
+        interpolation_matplotlib: Matplotlib interpolation.
+        context: Matplotlib style context.
+        n_steps: Number of lines to select (default: image width).
+        std_dev: Stddev for the upside-down Gaussian.
+        num_lines_to_update: Width of the reweighting window (should be odd).
+        gif_fps: Frames per second for the gif.
+    """
+    from keras import ops
+
+    vmin, vmax = np.nanpercentile(variance_image, [0, 99.9])
+    variance_image = np.clip(variance_image, vmin, vmax)
+    H, W = variance_image.shape
+    n_possible_actions = W
+    if n_steps is None:
+        n_steps = n_possible_actions
+
+    # Prepare the upside-down Gaussian kernel
+    mean = 0
+    assert num_lines_to_update % 2 == 1, "num_lines_to_update must be odd."
+    points_to_evaluate = np.linspace(
+        mean - 2 * std_dev, mean + 2 * std_dev, num_lines_to_update
+    )
+    upside_down_gaussian = 1 - np.exp(
+        -0.5 * ((points_to_evaluate - mean) / std_dev) ** 2
+    )
+
+    # We'll work on a copy of the variance image
+    current_variance = variance_image.copy()
+    frames = []
+
+    sc_variance_initial = _scan_convert(
+        variance_image,
+        io_config.scan_conversion_angles,
+        order=scan_convert_order,
+        fill_value=np.nan,
+        resolution=0.1,
+    )
+    # global_min = sc_variance_initial.min()
+    global_max = np.nanmax(sc_variance_initial)
+    with plt.style.context(context):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.imshow(
+            sc_variance_initial,
+            cmap=cmap,
+            interpolation=interpolation_matplotlib,
+            norm=PowerNorm(gamma=0.4),
+        )
+        ax.axis("off")
+        plt.tight_layout()
+        plt.savefig("variance_initial.png")
+        plt.close()
+
+    for step in range(n_steps):
+        # Compute per-line (column) variance (mean over rows)
+        entropy_per_line = current_variance.mean(axis=0)
+
+        # Select the line with max variance
+        max_entropy_line = np.argmax(entropy_per_line)
+
+        # Pad the entropy vector for reweighting
+        pad = num_lines_to_update // 2
+        padded_entropy = np.pad(entropy_per_line, (pad, pad), mode="constant")
+        reweighting = np.ones_like(padded_entropy)
+        reweighting[max_entropy_line : max_entropy_line + num_lines_to_update] = (
+            upside_down_gaussian
+        )
+        updated_entropy = padded_entropy * reweighting
+        updated_entropy = updated_entropy[pad : pad + n_possible_actions]
+
+        # Apply the reweighting to the variance image columns
+        for i in range(num_lines_to_update):
+            col = max_entropy_line + i - pad
+            if 0 <= col < n_possible_actions:
+                current_variance[:, col] *= upside_down_gaussian[i]
+
+        vis_variance = current_variance.copy()
+        vis_variance[:, max_entropy_line] = global_max * 1.2  # exaggerate brightness
+
+        # Scan convert for visualization
+        sc_variance = _scan_convert(
+            vis_variance,
+            io_config.scan_conversion_angles,
+            order=scan_convert_order,
+            fill_value=np.nan,
+            resolution=0.1,
+        )
+        # sc_variance_norm = (sc_variance - sc_variance.min()) / (sc_variance.max() - sc_variance.min() + 1e-8)
+
+        # Plot and save frame
+        with plt.style.context(context):
+            fig, ax = plt.subplots(figsize=(6, 6))
+            im = ax.imshow(
+                sc_variance,
+                cmap=cmap,
+                interpolation=interpolation_matplotlib,
+                norm=PowerNorm(gamma=0.4),
+            )
+            # plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, shrink=0.6)
+            # ax.set_title(f"Step {step+1}: Line {max_entropy_line}", fontsize=16)
+            ax.axis("off")
+            plt.tight_layout()
+            fig.canvas.draw()
+            # frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            # frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+            frames.append(frame)
+            plt.close(fig)
+
+        # Stop if all variance is (almost) gone
+        if np.all(current_variance < 1e-6):
+            break
+
+    # Save as GIF
+    import imageio
+
+    imageio.mimsave(save_path, frames, fps=gif_fps)
+    print(f"Saved GreedyEntropy variance reduction demo to {save_path}")

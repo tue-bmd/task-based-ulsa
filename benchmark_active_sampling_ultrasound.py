@@ -352,11 +352,13 @@ def benchmark(
         target_sequence_preprocessed = zea.utils.translate(
             target_sequence[..., None], dynamic_range, (-1, 1)
         )
-        downstream_task, targets_dst, reconstructions_dst, _ = apply_downstream_task(
-            downstream_task,
-            agent_config,
-            target_sequence_preprocessed,
-            results.belief_distributions,
+        downstream_task, targets_dst, reconstructions_dst, beliefs_dst = (
+            apply_downstream_task(
+                downstream_task,
+                agent_config,
+                target_sequence_preprocessed,
+                results.belief_distributions,
+            )
         )
 
         denormalized = results.to_uint8(agent.input_range)
@@ -407,6 +409,7 @@ def benchmark(
                     {
                         f"{downstream_task.output_type()}_targets": targets_dst,
                         f"{downstream_task.output_type()}_reconstructions": reconstructions_dst,
+                        f"{downstream_task.output_type()}_beliefs": beliefs_dst,
                     }
                     if downstream_task is not None
                     else {}
@@ -554,7 +557,7 @@ def run_benchmark(
 
     run_level_subkey = initial_run_key.copy()
 
-    dataset = Dataset(target_dir, key=data_type, validate=validate_dataset)
+    dataset = Dataset(target_dir, key=data_type, validate=validate_dataset, search_file_tree_kwargs={"write": False})
 
     if limit_n_samples is None:
         limit_n_samples = len(dataset)
@@ -601,13 +604,17 @@ def extract_sweep_data(
     strategies_to_plot=None,
     include_only_these_files=None,
 ):
-    """Load all metrics from a sweep directory. Now uses segmentation_mask_targets and segmentation_mask_reconstructions from metrics.npz."""
+    """Load all metrics from a sweep directory and return as pandas DataFrame."""
+    import pandas as pd
+
     sweep_details_path = os.path.join(sweep_dir, "sweep_details.yaml")
     if not os.path.exists(sweep_details_path):
         raise FileNotFoundError(f"Missing sweep_details.yaml in {sweep_dir}")
 
+    dst_model = EchoNetLVHSegmentation()
+
     sweep_details = Config.from_yaml(sweep_details_path)
-    results = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    results = []
 
     for run_dir in sorted(os.listdir(sweep_dir)):
         run_path = os.path.join(sweep_dir, run_dir)
@@ -627,6 +634,7 @@ def extract_sweep_data(
         config = Config.from_yaml(config_path)
         metrics = np.load(metrics_path, allow_pickle=True)
         target_file = Config.from_yaml(filepath_yaml)["target_filepath"]
+        target_file_hash = Path(target_file).stem
 
         # Optional file filter
         if (
@@ -653,74 +661,182 @@ def extract_sweep_data(
         ):
             continue
 
-        # Extract masks and images for comparison and plotting
+        # Initialize result row with basic information
+        result_row = {
+            "selection_strategy": selection_strategy,
+            "x_value": x_value,
+            "filepath": target_file,
+            "filename": Path(target_file).stem,
+            "run_path": run_path,
+        }
+
+        # Extract masks and compute downstream metrics
         if (
             "segmentation_mask_targets" in metrics
             and "segmentation_mask_reconstructions" in metrics
         ):
-            # TODO: converting to an array is slow here -- maybe faster way to do it?
-            gt_masks = np.array(metrics[f"segmentation_mask_targets"])
-            pred_masks = np.array(metrics[f"segmentation_mask_reconstructions"])
-            if "dice" in keys_to_extract:
-                dice_score = compute_dice_score(pred_masks, gt_masks)
-                results["dice"][selection_strategy][x_value].append(np.mean(dice_score))
-            elif "heatmap_center_mse" in keys_to_extract:
-                measurement_type = "LVPW"  # TODO: hard coded for now
-                gt_bottom_coords, gt_top_coords = (
-                    EchoNetLVHSegmentation.outputs_to_coordinates(
-                        gt_masks, measurement_type
-                    )
-                )
-                pred_bottom_coords, pred_top_coords = (
-                    EchoNetLVHSegmentation.outputs_to_coordinates(
-                        pred_masks, measurement_type
-                    )
-                )
-                bottom_mean_euclidean_distance = ops.mean(
-                    [
-                        ops.sqrt(
-                            ops.sum((gt_bottom_coords[i] - pred_bottom_coords[i]) ** 2)
-                        )
-                        for i in range(len(gt_bottom_coords))
-                    ]
-                )
-                top_mean_euclidean_distance = ops.mean(
-                    [
-                        ops.sqrt(ops.sum((gt_top_coords[i] - pred_top_coords[i]) ** 2))
-                        for i in range(len(gt_top_coords))
-                    ]
-                )
-                # NOTE: currently taking the mean over both points, but could report both
-                results["heatmap_center_mse"][selection_strategy][x_value].append(
-                    float(
-                        (bottom_mean_euclidean_distance + top_mean_euclidean_distance)
-                        / 2
-                    )
-                )
-            # TODO: implement earth mover distance / mse for logits
-
-            # Store masks and images for plotting
-            results["masks"][selection_strategy][x_value].append(
-                {
-                    "masks": pred_masks,
-                    "x_scan_converted": metrics["reconstructions"],
-                    "run_dir": run_path,
-                    "gt_masks": gt_masks,
-                }
+            gt_masks = ops.convert_to_tensor(metrics["segmentation_mask_targets"])
+            pred_masks = ops.convert_to_tensor(
+                metrics["segmentation_mask_reconstructions"]
             )
 
-        # Add other metrics
+            # Compute DICE score
+            if "dice" in keys_to_extract:
+                dice_score = compute_dice_score(pred_masks, gt_masks)
+                result_row["dice"] = np.mean(dice_score)
+
+            # Compute heatmap center MSE metrics
+            for key in keys_to_extract:
+                if key.startswith("heatmap_center_mse_"):
+                    measurement_type = key.replace("heatmap_center_mse_", "")
+                    valid_types = ["LVPW", "LVID", "IVS"]
+                    if measurement_type not in valid_types:
+                        log.warning(
+                            f"Invalid measurement type '{measurement_type}' in key '{key}'. Valid types: {valid_types}"
+                        )
+                        continue
+
+                    try:
+                        gt_bottom_coords, gt_top_coords = (
+                            dst_model.outputs_to_coordinates(gt_masks, measurement_type)
+                        )
+                        pred_bottom_coords, pred_top_coords = (
+                            dst_model.outputs_to_coordinates(
+                                pred_masks, measurement_type
+                            )
+                        )
+                        bottom_mean_euclidean_distance = ops.mean(
+                            [
+                                ops.sqrt(
+                                    ops.sum(
+                                        (gt_bottom_coords[i] - pred_bottom_coords[i])
+                                        ** 2
+                                    )
+                                )
+                                for i in range(len(gt_bottom_coords))
+                            ]
+                        )
+                        top_mean_euclidean_distance = ops.mean(
+                            [
+                                ops.sqrt(
+                                    ops.sum(
+                                        (gt_top_coords[i] - pred_top_coords[i]) ** 2
+                                    )
+                                )
+                                for i in range(len(gt_top_coords))
+                            ]
+                        )
+                        result_row[key] = float(
+                            (
+                                bottom_mean_euclidean_distance
+                                + top_mean_euclidean_distance
+                            )
+                            / 2
+                        )
+                    except Exception as e:
+                        log.warning(f"Failed to compute {key} for {run_path}: {e}")
+                        result_row[key] = np.nan
+
+            # Compute heatmap MSE
+            if "heatmap_mse" in keys_to_extract:
+                try:
+                    mse = ops.mean((gt_masks - pred_masks) ** 2)
+                    result_row["heatmap_mse"] = float(ops.mean(mse))
+                except Exception as e:
+                    log.warning(f"Failed to compute heatmap_mse for {run_path}: {e}")
+                    result_row["heatmap_mse"] = np.nan
+
+            # Compute measurement length MAE metrics
+            for key in keys_to_extract:
+                if key.startswith("measurement_length_mae_"):
+                    measurement_type = key.replace("measurement_length_mae_", "")
+                    valid_types = ["LVPW", "LVID", "IVS"]
+                    if measurement_type not in valid_types:
+                        log.warning(
+                            f"Invalid measurement type '{measurement_type}' in key '{key}'. Valid types: {valid_types}"
+                        )
+                        continue
+
+                    def compute_line_length(bottom_coords, top_coords):
+                        """Compute Euclidean distance between bottom and top coordinates"""
+                        if bottom_coords is None or top_coords is None:
+                            return np.nan
+                        if target_file_hash is None:
+                            return np.sqrt(np.sum((bottom_coords - top_coords) ** 2))
+                        else:
+                            return dst_model.get_distance_in_cm(
+                                target_file_hash, bottom_coords, top_coords
+                            )
+
+                    try:
+                        # Vectorized computation of line lengths
+                        def compute_line_length_single(dst_output):
+                            bottom, top = dst_model.outputs_to_coordinates(
+                                dst_output[None, ...], measurement_type
+                            )
+                            return compute_line_length(bottom, top)
+
+                        # Compute target and predicted line lengths using vectorized_map
+                        target_line_lengths = ops.vectorized_map(
+                            compute_line_length_single,
+                            gt_masks,
+                        )
+                        pred_line_lengths = ops.vectorized_map(
+                            compute_line_length_single,
+                            pred_masks,
+                        )
+
+                        # Convert to numpy arrays and filter out NaN values
+                        target_lengths = ops.convert_to_numpy(target_line_lengths)
+                        pred_lengths = ops.convert_to_numpy(pred_line_lengths)
+
+                        # Only compute MAE for frames where both target and prediction are valid
+                        valid_mask = ~(
+                            np.isnan(target_lengths) | np.isnan(pred_lengths)
+                        )
+
+                        if np.any(valid_mask):
+                            valid_target_lengths = target_lengths[valid_mask]
+                            valid_pred_lengths = pred_lengths[valid_mask]
+
+                            # Compute MAE
+                            measurement_length_mae = np.mean(
+                                np.abs(valid_target_lengths - valid_pred_lengths)
+                            )
+                            result_row[key] = float(measurement_length_mae)
+                        else:
+                            # No valid measurements found
+                            log.warning(
+                                f"No valid measurements found for {measurement_type} in {run_path}"
+                            )
+                            result_row[key] = np.nan
+                    except Exception as e:
+                        log.warning(f"Failed to compute {key} for {run_path}: {e}")
+                        result_row[key] = np.nan
+
+        # Add other standard metrics
         for metric_name in keys_to_extract:
-            if metric_name == "dice":
+            if metric_name in ["dice"] or metric_name.startswith(
+                ("heatmap_", "measurement_length_")
+            ):
                 continue  # Already handled above
             if metric_name not in metrics:
                 continue
-            metric_values = metrics[metric_name]
-            if isinstance(metric_values, np.ndarray) and metric_values.size > 0:
-                sequence_means = np.mean(metric_values, axis=-1)
-                results[metric_name][selection_strategy][x_value].append(sequence_means)
 
-    return results
+            try:
+                metric_values = metrics[metric_name]
+                if isinstance(metric_values, np.ndarray) and metric_values.size > 0:
+                    sequence_means = np.mean(metric_values, axis=-1)
+                    result_row[metric_name] = sequence_means
+                else:
+                    result_row[metric_name] = np.nan
+            except Exception as e:
+                log.warning(f"Failed to extract {metric_name} for {run_path}: {e}")
+                result_row[metric_name] = np.nan
+
+        results.append(result_row)
+
+    return pd.DataFrame(results)
 
 
 if __name__ == "__main__":

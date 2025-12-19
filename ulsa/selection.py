@@ -33,6 +33,8 @@ class DownstreamTaskSelection(GreedyEntropy):
         mean: float = 0,
         std_dev: float = 1,
         num_lines_to_update: int = 5,
+        # TODO: include downstream task kwargs
+        **kwargs,
     ):
         """
         downstream_task_model should be differentiable
@@ -50,44 +52,25 @@ class DownstreamTaskSelection(GreedyEntropy):
         # TODO: batch_size=4 shouldn't be hard coded
         self.downstream_task: DifferentiableDownstreamTask = (
             downstream_task_registry[downstream_task_key]
-        )(batch_size=4)
+        )(batch_size=4, **kwargs)
 
-    def compute_output_and_saliency_propagation_hutchinson(self, particles, key):
-        num_hutchinson_samples = 5
-
-        z_squared = ops.zeros(self.downstream_task.output_shape)
-        for i in range(num_hutchinson_samples):  # TODO: vmap
-            subkey = jax.random.fold_in(key, i)
-            v = jax.random.normal(
-                subkey, self.downstream_task
-            )  # TODO: downstream task output shape?
-            # vjp returns a function that computes J^T v
-            _, vjp_fun = jax.vjp(self.downstream_task.call_differentiable, particles)
-            jt_v = vjp_fun(v)[0]  # [0] to get the input tangent
-            z_squared += jt_v**2
-
-        posterior_variance = ops.expand_dims(ops.var(particles, axis=0), axis=0)
-
-        return (
-            posterior_variance * z_squared
-        )  # TODO: where does z_squared get rid of the particle dim?
-
-    def compute_output_and_saliency_propagation_summed(self, particles):
+    def compute_output_and_saliency_propagation(self, particles):
+        """
+        Should only be used for downstream tasks with scalar output.
+        """
         autograd = AutoGrad()
 
-        def call_model(model_input):
-            model_output = self.downstream_task.call_differentiable(model_input)
-            return ops.sum(model_output)
-
-        autograd.set_function(call_model)
+        # val = self.downstream_task.call_differentiable(particles[0, None, ...])
+        autograd.set_function(self.downstream_task.call_differentiable)
         echonet_grad_and_value_fn = autograd.get_gradient_and_value_jit_fn()
-        grads, _ = echonet_grad_and_value_fn(particles)
+        jacobian, _ = ops.vectorized_map(
+            echonet_grad_and_value_fn,
+            particles[:, None, ...],  # add batch dim for segmenter
+        )
 
         posterior_variance = ops.expand_dims(ops.var(particles, axis=0), axis=0)
-        mean_absolute_jacobian = ops.expand_dims(
-            ops.mean(ops.abs(grads), axis=0), axis=0
-        )
-        return posterior_variance * mean_absolute_jacobian
+        mean_jacobian = ops.mean(jacobian, axis=0)
+        return posterior_variance * (mean_jacobian**2)  # don't sum yet
 
     def sum_neighbouring_columns_into_n_possible_actions(self, full_linewise_salience):
         full_image_width = ops.shape(full_linewise_salience)[1]
@@ -112,8 +95,11 @@ class DownstreamTaskSelection(GreedyEntropy):
                 - Masks of shape (batch_size, img_height, img_width)
         """
         particles = ops.expand_dims(particles[0], axis=-1)  # remove batch, add channel
+        # pixelwise_contribution_to_var_dst = (
+        #     self.compute_output_and_saliency_propagation_summed(particles)
+        # )
         pixelwise_contribution_to_var_dst = (
-            self.compute_output_and_saliency_propagation_summed(particles)
+            self.compute_output_and_saliency_propagation(particles)
         )
         linewise_contribution_to_var_dst = ops.sum(
             pixelwise_contribution_to_var_dst[..., 0], axis=1
