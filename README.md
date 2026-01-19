@@ -7,7 +7,7 @@ Online transmit-scheme optimization designed to minimize uncertainty about downs
 ![lvid_measurements_timeseries](https://github.com/user-attachments/assets/dc98cb43-99cf-4fa2-94f1-57cfd8d958da)
 
 Find the weights of our models on Huggingface:
-- [EchoNetLVH Segmentation Model](https://huggingface.co/zeahub/echonetlvh).
+- [EchoNetLVH Segmentation Model](https://huggingface.co/zeahub/echonetlvh)
 - [EchoNetLVH Diffusion Model](https://huggingface.co/zeahub/diffusion-echonetlvh)
 
 ## Setup code
