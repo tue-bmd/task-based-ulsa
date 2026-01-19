@@ -39,8 +39,8 @@ touch users.yaml # edit!
 
 - Download the [EchoNetLVH dataset](https://echonet.github.io/lvh/index.html#dataset).
 
-- Convert the dataset to the polar format using the `zea` conversion scripts described (here)[https://github.com/tue-bmd/zea/tree/main/zea/data/convert/echonetlvh].
+- Convert the dataset to the polar format using the `zea` conversion scripts described [here](https://github.com/tue-bmd/zea/tree/main/zea/data/convert/echonetlvh).
 
 
 ## Example Notebook
-See the `zea` example notebook implementing the task-based perception action loop: [https://zea.readthedocs.io/en/latest/notebooks/agent/task_based_perception_action_loop.html](https://zea.readthedocs.io/en/latest/notebooks/agent/task_based_perception_action_loop.html)
+See the `zea` example notebook implementing the task-based perception action loop, [here](https://zea.readthedocs.io/en/latest/notebooks/agent/task_based_perception_action_loop.html).
